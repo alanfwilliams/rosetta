@@ -169,7 +169,7 @@ if not argv.count('-subsystem') or \
 	if symm_type_name == "cn":
 		print( "symmetry_name " + symm_type_name[:1] + nsub )
 	if symm_type_name == "dn":
-		 print( "symmetry_name " + symm_type_name[:1] + str(subunits/2) )
+		print( "symmetry_name " + symm_type_name[:1] + str(subunits/2) )
 	print( "subunits " + nsub )
 	print( "recenter" )
 	print( "number_of_interfaces ", num_interfaces )

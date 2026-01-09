@@ -677,7 +677,7 @@ def rna_helix( seq, resnum, output_pdb, rosetta_directory, rosetta_extension, te
     cmdline += '-o %s ' % temp.name
     cmdline += '-seq ' + seq + ' '
     if test:
-	    cmdline += '-testing:INTEGRATION_TEST '
+        cmdline += '-testing:INTEGRATION_TEST '
     p = subprocess.Popen(cmdline.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE )
     out, err = p.communicate()
     if err and len(err):
@@ -830,44 +830,44 @@ def get_ints( int_string, value ): # could be of the form 5-8  or -9--5
     return True
 
 def easy_cat( outfile ):
-	
-	which_files_to_cat = {}
-	
-	globfiles = glob.glob( outfile+'/*/*out' )
-	
-	if len( globfiles ) == 0: globfiles = glob.glob( outfile + '/*out'  )
-	
-	# Remove any "checkpoint" files from stepwise checkpointing
-	globfiles = filter( lambda x: "S_" not in x and "_checkpoint" not in x, globfiles )
-	
-	# make sure to order 0,1,2,... 10, 11, 12, ... 100, 101, ...
-	globfiles_with_length = []
-	for f in globfiles:
-		globfiles_with_length.append( [len(f), f] )
-	
-	globfiles_with_length.sort()
-	globfiles = []
-	for f in globfiles_with_length:
-		globfiles.append( f[1] )
-	#for x in globfiles: print( x )
-	
-	for file in globfiles:
-	    tag = os.path.basename( file ).replace('.out','')
-	    if tag not in which_files_to_cat.keys():
-	        which_files_to_cat[tag] = []
-	    which_files_to_cat[tag].append( file )
-	
-	
-	for tag in which_files_to_cat.keys():
-	    cat_file = tag+".out"
-	    cat_outfiles( which_files_to_cat[tag], cat_file )
-	
-	    lines = os.popen( 'grep SCORE '+cat_file).readlines()
-	
-	    fid_sc = open( cat_file.replace('.out','.sc'),'w' )
-	    for line in lines:
-	        fid_sc.write( line )
-	    fid_sc.close()
+
+    which_files_to_cat = {}
+
+    globfiles = glob.glob( outfile+'/*/*out' )
+
+    if len( globfiles ) == 0: globfiles = glob.glob( outfile + '/*out'  )
+
+    # Remove any "checkpoint" files from stepwise checkpointing
+    globfiles = filter( lambda x: "S_" not in x and "_checkpoint" not in x, globfiles )
+
+    # make sure to order 0,1,2,... 10, 11, 12, ... 100, 101, ...
+    globfiles_with_length = []
+    for f in globfiles:
+        globfiles_with_length.append( [len(f), f] )
+
+    globfiles_with_length.sort()
+    globfiles = []
+    for f in globfiles_with_length:
+        globfiles.append( f[1] )
+    #for x in globfiles: print( x )
+
+    for file in globfiles:
+        tag = os.path.basename( file ).replace('.out','')
+        if tag not in which_files_to_cat.keys():
+            which_files_to_cat[tag] = []
+        which_files_to_cat[tag].append( file )
+
+
+    for tag in which_files_to_cat.keys():
+        cat_file = tag+".out"
+        cat_outfiles( which_files_to_cat[tag], cat_file )
+
+        lines = os.popen( 'grep SCORE '+cat_file).readlines()
+
+        fid_sc = open( cat_file.replace('.out','.sc'),'w' )
+        for line in lines:
+            fid_sc.write( line )
+        fid_sc.close()
 
 def cat_outfiles( outfiles, output_file ):
     fid = open( output_file, "w" )
@@ -885,15 +885,15 @@ def cat_outfiles( outfiles, output_file ):
             for line in data:
                 line = line[:-1]
                 if not line: break
-	
-	            if line[:9] == 'SEQUENCE:':
-	                if sequence_line_found: continue # Should not be any more sequence lines!
-	                else: sequence_line_found = 1
-	
-	            if line.find( 'description' ) > -1:
-	                if description_line_found: continue
-	                else: description_line_found = 1
-	
+
+                if line[:9] == 'SEQUENCE:':
+                    if sequence_line_found: continue # Should not be any more sequence lines!
+                    else: sequence_line_found = 1
+
+                if line.find( 'description' ) > -1:
+                    if description_line_found: continue
+                    else: description_line_found = 1
+
             description_index = line.find(' S_')
             if description_index < 0:
                 description_index = line.find(' F_')
@@ -903,100 +903,99 @@ def cat_outfiles( outfiles, output_file ):
                 tag = line[description_index:]
                 newtag = tag + "_%03d" % n_file
                 line = line[:description_index] + newtag
-	
-	            if len(line) < 1: continue
-	
-	            fid.write( line+'\n' )
-	
-	        data.close()
-	
-	fid.close()
+
+                if len(line) < 1: continue
+
+                fid.write( line+'\n' )
+
+            data.close()
+
+    fid.close()
 
 def extract_lowscore_decoys( silent_file, NSTRUCT, rosetta_directory, rosetta_extension, test=False):
-	
-	MINI_DIR = rosetta_directory 
-	
-	tags = []
-	
-	scoretags = os.popen('head -n 2 '+silent_file).readlines()[1]
-	#scoretags = string.split( popen('head -n 2 '+silent_file).readlines()[1] )
-	scoretag=''
-	
-	scorecols  = [-1]
-	
-	
-	binary_silentfile = 0
-	remark_lines = os.popen('head -n 7 '+silent_file).readlines()
-	for line in remark_lines:
-	    if ( len( line ) > 6 and line[:6] == "REMARK" ):
-	        remark_tags = line.split()
-	        if remark_tags.count('BINARY_SILENTFILE'):
-	            binary_silentfile = 1
-	        if remark_tags.count('BINARY'):
-	            binary_silentfile = 1
-	
-	coarse = 0
-	if os.path.exists( 'remark_tags') and remark_tags.count('COARSE'):
-	    coarse = 1
-	
-	assert(silent_file[-3:] == 'out')
-	
-	# Make the list of decoys to extract
-	lines = os.popen( 'grep SCORE '+silent_file+' | grep -v NATIVE').readlines()
-	
-	score_plus_lines = []
-	for line in lines:
-	    cols =  line.split()
-	    #cols = string.split( line )
-	    score = 0.0
-	    try:
-	        for scorecol in scorecols: score += float( cols[ abs(scorecol) ] )
-	    except:
-	        continue
-	    score_plus_lines.append( ( score, line ))
-	
-	score_plus_lines.sort()
-	lines = map( lambda x:x[-1], score_plus_lines[:NSTRUCT] )
-	
-	templist_name = 'temp.%s.list' %(os.path.basename(silent_file))
-	
-	fid = open(templist_name,'w')
-	count = 0
-	for line in lines:
-	    cols = line.split()
-	    #cols = string.split(line)
-	    tag = cols[-1]
-	    if tag.find('desc') < 0:
-	        fid.write(tag+'\n')
-	        tags.append(tag)
-	        count = count+1
-	    if NSTRUCT and count >= NSTRUCT:
-	        break
-	outfilename = silent_file
-	
-	fid.close()
-	#Set up bonds file?
-	softlink_bonds_file = 0
-	wanted_bonds_file = silent_file+'.bonds'
-	wanted_rot_templates_file = silent_file+'.rot_templates'
-	bonds_files = glob.glob( '*.bonds')
-	if len( bonds_files ) > 0:
-	    if not os.path.exists( wanted_bonds_file ):
-	        softlink_bonds_file = 1
-	        system( 'ln -fs '+bonds_files[0]+' '+wanted_bonds_file )
-	        system( 'ln -fs '+bonds_files[0].replace('.bonds','.rot_templates') \
-	                +' '+wanted_rot_templates_file )
-	
-	
-	MINI_EXE = MINI_DIR+'extract_pdbs'+rosetta_extension
-	
-	tag_str = ''
-	for tag in tags:
-		tag_str += tag + ' '
-	command = '%s -load_PDB_components -in:file:silent %s -in:file:tags %s' % ( MINI_EXE, outfilename, tag_str )
-	if test:
-	        command += ' -testing:INTEGRATION_TEST '
-	
+
+    MINI_DIR = rosetta_directory
+
+    tags = []
+
+    scoretags = os.popen('head -n 2 '+silent_file).readlines()[1]
+    #scoretags = string.split( popen('head -n 2 '+silent_file).readlines()[1] )
+    scoretag=''
+
+    scorecols  = [-1]
+
+    binary_silentfile = 0
+    remark_lines = os.popen('head -n 7 '+silent_file).readlines()
+    for line in remark_lines:
+        if ( len( line ) > 6 and line[:6] == "REMARK" ):
+            remark_tags = line.split()
+            if remark_tags.count('BINARY_SILENTFILE'):
+                binary_silentfile = 1
+            if remark_tags.count('BINARY'):
+                binary_silentfile = 1
+
+    coarse = 0
+    if os.path.exists( 'remark_tags') and remark_tags.count('COARSE'):
+        coarse = 1
+
+    assert(silent_file[-3:] == 'out')
+
+    # Make the list of decoys to extract
+    lines = os.popen( 'grep SCORE '+silent_file+' | grep -v NATIVE').readlines()
+
+    score_plus_lines = []
+    for line in lines:
+        cols =  line.split()
+        #cols = string.split( line )
+        score = 0.0
+        try:
+            for scorecol in scorecols: score += float( cols[ abs(scorecol) ] )
+        except:
+            continue
+        score_plus_lines.append( ( score, line ))
+
+    score_plus_lines.sort()
+    lines = map( lambda x:x[-1], score_plus_lines[:NSTRUCT] )
+
+    templist_name = 'temp.%s.list' %(os.path.basename(silent_file))
+
+    fid = open(templist_name,'w')
+    count = 0
+    for line in lines:
+        cols = line.split()
+        #cols = string.split(line)
+        tag = cols[-1]
+        if tag.find('desc') < 0:
+            fid.write(tag+'\n')
+            tags.append(tag)
+            count = count+1
+        if NSTRUCT and count >= NSTRUCT:
+            break
+    outfilename = silent_file
+
+    fid.close()
+    #Set up bonds file?
+    softlink_bonds_file = 0
+    wanted_bonds_file = silent_file+'.bonds'
+    wanted_rot_templates_file = silent_file+'.rot_templates'
+    bonds_files = glob.glob( '*.bonds')
+    if len( bonds_files ) > 0:
+        if not os.path.exists( wanted_bonds_file ):
+            softlink_bonds_file = 1
+            os.system( 'ln -fs '+bonds_files[0]+' '+wanted_bonds_file )
+            os.system( 'ln -fs '+bonds_files[0].replace('.bonds','.rot_templates') \
+                    +' '+wanted_rot_templates_file )
+
+
+    MINI_EXE = MINI_DIR+'extract_pdbs'+rosetta_extension
+
+    tag_str = ''
+    for tag in tags:
+        tag_str += tag + ' '
+    command = '%s -load_PDB_components -in:file:silent %s -in:file:tags %s' % ( MINI_EXE, outfilename, tag_str )
+    if test:
+        command += ' -testing:INTEGRATION_TEST '
+
 #	# Check if this is an RNA run.
 #	with open( silent_file ) as fid:
 #		line = fid.readline() # Should be the sequence.
@@ -1009,13 +1008,13 @@ def extract_lowscore_decoys( silent_file, NSTRUCT, rosetta_directory, rosetta_ex
 #		        rna = 0
 #		        break
 #	if rna: command  += ' -enable_dna -enable_rna '
-	
-	# Check if this is full atom.
-	lines = os.popen('head -n 8 '+outfilename).readlines()
-	if len(lines[6].split()) > 10:
-	#if len(string.split(lines[6])) > 10:
-	    command += ' -fa_input'
-	
+
+    # Check if this is full atom.
+    lines = os.popen('head -n 8 '+outfilename).readlines()
+    if len(lines[6].split()) > 10:
+        #if len(string.split(lines[6])) > 10:
+        command += ' -fa_input'
+
 #	if rna:
 #	    command = '%s -load_PDB_components -in::file::silent %s -tags %s  -extract' % \
 #	              ( MINI_EXE, outfilename, tag_str )
@@ -1035,32 +1034,32 @@ def extract_lowscore_decoys( silent_file, NSTRUCT, rosetta_directory, rosetta_ex
 #	        pass
 #	
 #	elif ( binary_silentfile ):
-	if ( binary_silentfile ):
-	
-	    command = '%s -load_PDB_components -in:file:silent  %s  -in:file:silent_struct_type binary -in:file:fullatom -in:file:tags %s -mute all' % \
-	              ( MINI_EXE, outfilename, tag_str )
-	    if test:
-	            command += ' -testing:INTEGRATION_TEST '
-	    
-	    if (scoretags.count('vdw')): command += ' -out:file:residue_type_set centroid '
-	
-	#print(command)
-	os.system(command)
-	
-	count = 1
-	
-	for tag in tags:
-	    command = 'mv %s.pdb %s.%d.pdb' % (tag,os.path.basename(silent_file),count)
-	    #print(command)
-	    os.system(command)
-	    count += 1
-	
-	command = 'rm '+templist_name
-	#print(command)
-	os.system(command)
-	
-	if (softlink_bonds_file):
-	    #system( 'rm '+wanted_bonds_file+' '+wanted_rot_templates_file )
-	    print( ' WARNING! WARNING' )
-	    print( ' Found a .bonds and .rot_templates file and used it!' )
+    if ( binary_silentfile ):
+
+        command = '%s -load_PDB_components -in:file:silent  %s  -in:file:silent_struct_type binary -in:file:fullatom -in:file:tags %s -mute all' % \
+                  ( MINI_EXE, outfilename, tag_str )
+        if test:
+            command += ' -testing:INTEGRATION_TEST '
+
+        if (scoretags.count('vdw')): command += ' -out:file:residue_type_set centroid '
+
+    #print(command)
+    os.system(command)
+
+    count = 1
+
+    for tag in tags:
+        command = 'mv %s.pdb %s.%d.pdb' % (tag,os.path.basename(silent_file),count)
+        #print(command)
+        os.system(command)
+        count += 1
+
+    command = 'rm '+templist_name
+    #print(command)
+    os.system(command)
+
+    if (softlink_bonds_file):
+        #system( 'rm '+wanted_bonds_file+' '+wanted_rot_templates_file )
+        print( ' WARNING! WARNING' )
+        print( ' Found a .bonds and .rot_templates file and used it!' )
 	

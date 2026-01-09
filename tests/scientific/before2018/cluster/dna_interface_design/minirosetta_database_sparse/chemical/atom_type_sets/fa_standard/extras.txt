@@ -1,3 +1,0 @@
-extras/sasa_radii.txt
-extras/soft_rep_params.txt
-extras/gen_born_params.txt

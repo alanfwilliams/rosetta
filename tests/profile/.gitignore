@@ -1,7 +1,0 @@
-test_diffs.txt
-tests/*/output
-tests/*/command.sh
-.old_results.yaml
-.results.yaml
-.results.json
-.profile_test_results.json

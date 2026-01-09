@@ -26,11 +26,11 @@ def combine_pdbs(full_pdb, subset_pdbs, output_pdb):
 			write_subset_resi = False
 			atoms_to_compare = []
 			if c in s_pdb_lines.keys():
-			 if r in s_pdb_lines[c].keys():
-			  if sequence[c][r]!=s_sequence[c][r]: write_subset_resi = True
-			  else:
-			   for s_atom in s_pdb_lines[c][r].keys():
-				  atoms_to_compare.append(s_atom)
+				if r in s_pdb_lines[c].keys():
+					if sequence[c][r]!=s_sequence[c][r]: write_subset_resi = True
+					else:
+						for s_atom in s_pdb_lines[c][r].keys():
+							atoms_to_compare.append(s_atom)
 			if write_subset_resi:
 				for atom in s_pdb_lines[c][r].keys():
 					fout.write( s_pdb_lines[c][r][atom]+'\n' )
