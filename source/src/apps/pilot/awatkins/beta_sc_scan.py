@@ -41,30 +41,30 @@ def scan_chi(pose, score_fxn, mm, extension):
     #utility::vector1< utility::vector1< Real > > results;
     if pose.residue_type( 1 ).nchi() == 1:
         for chi1 in xrange(0, 360, 10):
-	    #utility::vector1< Real > row;
+            #utility::vector1< Real > row;
             pose.conformation().set_torsion( core.id.TorsionID( 1, core.id.CHI, 1 ), chi1 )
             # score the pose
             #Real orig_ener( ( *score_fxn )( pose ) );
-	    minmover.apply(pose)
-	    pose.dump_pdb("pose_{chi1}_{ext}.pdb".format(chi1=chi1, ext=extension))
-	    min_ener = pose.energies().total_energy()
-	    #row.push_back(min_ener);
-	    #results.push_back( row );
-	#print results
+            minmover.apply(pose)
+            pose.dump_pdb("pose_{chi1}_{ext}.pdb".format(chi1=chi1, ext=extension))
+            min_ener = pose.energies().total_energy()
+            #row.push_back(min_ener);
+            #results.push_back( row );
+        #print results
     elif pose.residue_type( 1 ).nchi() == 2:
         for chi1 in xrange(0, 360, 10):
             for chi2 in xrange(0, 360, 10):
-	        #utility::vector1< Real > row;
+                #utility::vector1< Real > row;
                 pose.conformation().set_torsion( core.id.TorsionID( 1, core.id.CHI, 1 ), chi1 )
                 pose.conformation().set_torsion( core.id.TorsionID( 1, core.id.CHI, 2 ), chi2 )
                 # score the pose
                 #Real orig_ener( ( *score_fxn )( pose ) );
-	        minmover.apply(pose)
-	        pose.dump_pdb("pose_{chi1}_{chi2}_{ext}.pdb".format(chi1=chi1, chi2=chi2, ext=extension))
-	        min_ener = pose.energies().total_energy()
-	        #row.push_back(min_ener);
-	        #results.push_back( row );
-	    #print results
+                minmover.apply(pose)
+                pose.dump_pdb("pose_{chi1}_{chi2}_{ext}.pdb".format(chi1=chi1, chi2=chi2, ext=extension))
+                min_ener = pose.energies().total_energy()
+                #row.push_back(min_ener);
+                #results.push_back( row );
+            #print results
 
 if __name__ == '__main__':
     from pyrosetta import *
