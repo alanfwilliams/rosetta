@@ -668,9 +668,9 @@ def rna_helix( seq, resnum, output_pdb, rosetta_directory, rosetta_extension, te
     temp = tempfile.NamedTemporaryFile(delete=False)
     cmdline = os.path.expanduser( rosetta_directory ) + '/rna_helix' + rosetta_extension
     if not os.path.exists( cmdline ):
-	    print( 'ERROR: ' + cmdline + ' does not exist.' )
-	    print( 'Check that you have specified the correct -rosetta_directory and -rosetta_extension' )
-	    exit( 1 )
+        print( 'ERROR: ' + cmdline + ' does not exist.' )
+        print( 'Check that you have specified the correct -rosetta_directory and -rosetta_extension' )
+        exit( 1 )
     cmdline += (' -rna::corrected_geo  '+
                 '-score:rna_torsion_potential RNA11_based_new ' +
                 '-chemical::enlarge_H_lj ')
@@ -870,21 +870,21 @@ def easy_cat( outfile ):
 	    fid_sc.close()
 
 def cat_outfiles( outfiles, output_file ):
-	fid = open( output_file, "w" )
-	
-	sequence_line_found    = 0
-	description_line_found = 0
-	remark_line_found      = 0
-	n_file = -1
-	
-	for out_f in outfiles:
-	    all_files = glob.glob(out_f)
-	    for filename in all_files:
-	        data = open(filename)
-	        n_file += 1
-	        for line in data:
-	            line = line[:-1]
-	            if not line: break
+    fid = open( output_file, "w" )
+    
+    sequence_line_found    = 0
+    description_line_found = 0
+    remark_line_found      = 0
+    n_file = -1
+    
+    for out_f in outfiles:
+        all_files = glob.glob(out_f)
+        for filename in all_files:
+            data = open(filename)
+            n_file += 1
+            for line in data:
+                line = line[:-1]
+                if not line: break
 	
 	            if line[:9] == 'SEQUENCE:':
 	                if sequence_line_found: continue # Should not be any more sequence lines!
@@ -894,15 +894,15 @@ def cat_outfiles( outfiles, output_file ):
 	                if description_line_found: continue
 	                else: description_line_found = 1
 	
-	            description_index = line.find(' S_')
-	            if description_index < 0:
-	                description_index = line.find(' F_')
-	
-	            if description_index >= 0:
-	                description_index -= 1 # to get rid of space.
-	                tag = line[description_index:]
-	                newtag = tag + "_%03d" % n_file
-	                line = line[:description_index] + newtag
+            description_index = line.find(' S_')
+            if description_index < 0:
+                description_index = line.find(' F_')
+
+            if description_index >= 0:
+                description_index -= 1 # to get rid of space.
+                tag = line[description_index:]
+                newtag = tag + "_%03d" % n_file
+                line = line[:description_index] + newtag
 	
 	            if len(line) < 1: continue
 	
@@ -975,7 +975,6 @@ def extract_lowscore_decoys( silent_file, NSTRUCT, rosetta_directory, rosetta_ex
 	outfilename = silent_file
 	
 	fid.close()
-	
 	#Set up bonds file?
 	softlink_bonds_file = 0
 	wanted_bonds_file = silent_file+'.bonds'
