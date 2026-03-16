@@ -17,8 +17,10 @@ import pyrosetta
 import pyrosetta.rosetta.core.pose as pose
 import sys
 import tempfile
+import types
 import unittest
 
+from functools import partial
 from pyrosetta.bindings.scores import ClobberWarning, PoseScoreSerializer
 from pyrosetta.rosetta.core.pose import (
     getPoseExtraFloatScores,
@@ -29,6 +31,7 @@ from pyrosetta.rosetta.core.pose import (
     clearPoseExtraScore,
     clearPoseExtraScores,
 )
+from pyrosetta.rosetta.core.pose.datacache import CacheableDataType
 from pyrosetta.rosetta.core.scoring import all_atom_rmsd
 from pyrosetta.rosetta.core.simple_metrics import TestRealMetric, TestStringMetric
 from pyrosetta.rosetta.core.simple_metrics.metrics import (
@@ -773,6 +776,40 @@ class TestPoseCacheAccessor(unittest.TestCase):
         with self.assertWarns(ClobberWarning):
             dict(self.pose.cache)
 
+        # Test that `CacheableDataType.SIMPLE_METRIC_DATA` pose data is not automatically set by accessing `Pose.cache`
+        pose = pyrosetta.io.pose_from_sequence("TEST/SIMPLE/METRIC/DATA")
+        pickler = partial(pickle.dumps, protocol=pickle.DEFAULT_PROTOCOL)
+        bytes_start_1 = pickler(pose)
+        self.assertFalse(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
+        _ = dict(pose.cache) # Access `Pose.cache`
+        self.assertFalse(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
+        bytes_final_1 = pickler(pose)
+        self.assertEqual(bytes_start_1, bytes_final_1, msg="Pose is not bitwise identical after accessing `Pose.cache`.")
+        pose.cache.metrics["pi"] = math.pi # Add SimpleMetrics data
+        bytes_start_2 = pickler(pose)
+        self.assertTrue(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
+        _ = dict(pose.cache) # Access `Pose.cache`
+        self.assertTrue(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
+        bytes_final_2 = pickler(pose)
+        self.assertEqual(bytes_start_2, bytes_final_2, msg="Pose is not bitwise identical after accessing `Pose.cache`.")
+        self.assertNotEqual(bytes_final_1, bytes_final_2, msg="Pose is bitwise identical after adding SimpleMetrics data to `Pose.cache`.")
+
+        # Test `Pose.cache` access to SimpleMetrics data when `CacheableDataType.SIMPLE_METRIC_DATA` is not yet set up
+        pose = pyrosetta.io.pose_from_sequence("EMPTY/DATA/CACHE")
+        self.assertFalse(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
+        for _attr in (
+            "real",
+            "string",
+            "composite_real",
+            "composite_string",
+            "per_residue_real",
+            "per_residue_string",
+            "per_residue_probabilities",
+        ):
+            data = getattr(pose.cache.metrics, _attr)
+            self.assertIsInstance(data.all, types.MappingProxyType)
+            self.assertDictEqual(dict(data), {})
+        self.assertFalse(pose.data().has(CacheableDataType.SIMPLE_METRIC_DATA))
 
 class TestPoseResidueLabelAccessor(unittest.TestCase):
 
@@ -1205,6 +1242,55 @@ class TestPoseSecureUnpickler(unittest.TestCase):
                         _obj = test_pose.cache[key]
                     _msg = str(ex.exception)
                     self.assertTrue(_msg.startswith("Disallowed unpickling"), msg=_msg)
+
+        # Test that `numpy.load` is disallowed
+        test_pose = pyrosetta.pose_from_sequence("TEST")
+        pyrosetta.secure_unpickle.clear_secure_packages()
+        pyrosetta.secure_unpickle.add_secure_package("numpy")
+        class _ReduceObject:
+            def __reduce__(self):
+                return (numpy.load, tuple())
+        key = "np.load"
+        test_pose.cache[key] = _ReduceObject()
+        with self.assertRaises(UnpickleSecurityError) as ex:
+            _obj = test_pose.cache[key] # Test that `np.load` is disallowed
+        _msg = str(ex.exception)
+        self.assertTrue(_msg.startswith("Disallowed unpickling"), msg=_msg)
+        test_pose.cache.clear()
+        class _ReduceObject:
+            def __reduce__(self):
+                return (numpy.array, (list(range(10)),))
+        key = "np.array"
+        test_pose.cache[key] = _ReduceObject()
+        _obj = test_pose.cache[key] # Test that `np.array` is allowed
+
+        # Test that `pandas.read_pickle` is disallowed
+        try:
+            import pandas
+        except ImportError:
+            print("Skipping test with `pandas.read_pickle` because 'pandas' is not installed.")
+        if "pandas" in sys.modules:
+            pyrosetta.secure_unpickle.clear_secure_packages()
+            pyrosetta.secure_unpickle.add_secure_package("pandas")
+            pyrosetta.secure_unpickle.add_secure_package("pyarrow")
+            test_pose.cache.clear()
+            class _ReduceObject:
+                def __reduce__(self):
+                    return (pandas.read_pickle, tuple())
+            key = "pd.read_pickle"
+            test_pose.cache[key] = _ReduceObject()
+            with self.assertRaises(UnpickleSecurityError) as ex:
+                _obj = test_pose.cache[key] # Test that `pd.read_pickle` is disallowed
+            _msg = str(ex.exception)
+            self.assertTrue(_msg.startswith("Disallowed unpickling"), msg=_msg)
+            test_pose.cache.clear()
+            class _ReduceObject:
+                def __reduce__(self):
+                    return (pandas.DataFrame, ({0: []},))
+            key = "pd.DataFrame"
+            test_pose.cache[key] = _ReduceObject()
+            _obj = test_pose.cache[key] # Test that `pd.DataFrame` is allowed
+            test_pose.cache.clear()
 
 
 # if __name__ == "__main__":

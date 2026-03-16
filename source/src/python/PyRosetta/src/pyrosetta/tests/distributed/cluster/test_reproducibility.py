@@ -26,6 +26,7 @@ import tempfile
 import time
 import unittest
 
+
 from pyrosetta.distributed.cluster import (
     PyRosettaCluster,
     export_init_file,
@@ -34,6 +35,7 @@ from pyrosetta.distributed.cluster import (
     reproduce,
 )
 from pyrosetta.distributed.cluster.io import secure_read_pickle
+from pyrosetta.tests.distributed.cluster.setup_inputs import get_test_params_file, get_test_pdb_file
 
 
 class TestReproducibility(unittest.TestCase):
@@ -101,7 +103,7 @@ class TestReproducibility(unittest.TestCase):
                 simulation_records_in_scorefile=True,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -174,7 +176,7 @@ class TestReproducibility(unittest.TestCase):
                 simulation_records_in_scorefile=True,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -327,7 +329,7 @@ class TestReproducibility(unittest.TestCase):
                 simulation_records_in_scorefile=True,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -370,7 +372,7 @@ class TestReproducibility(unittest.TestCase):
                 simulation_records_in_scorefile=True,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -462,14 +464,18 @@ class TestReproducibilityMulti(unittest.TestCase):
                 )
             assert packed_pose.pose.size() >= 1
 
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra.real)
+            self.assertEqual(packed_pose.pose.cache.extra.real["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache.extra["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
             packed_pose.scores.clear()
             self.assertDictEqual({}, packed_pose.scores)
-
             pose = io.to_pose(packed_pose)
+            pose.cache.clear()
             pack_rotamers = PackRotamersMover(
                 scorefxn=pyrosetta.create_score_function("ref2015.wts"),
                 task=pyrosetta.standard_packer_task(pose),
@@ -490,10 +496,14 @@ class TestReproducibilityMulti(unittest.TestCase):
                 assert filter_results == False
                 return None
 
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics.real)
+            self.assertEqual(packed_pose.pose.cache.metrics.real["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache.metrics["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
             pose = io.to_pose(packed_pose)
             pack_rotamers = PackRotamersMover(
                 scorefxn=pyrosetta.create_score_function("ref2015.wts"),
@@ -542,7 +552,7 @@ class TestReproducibilityMulti(unittest.TestCase):
                     simulation_records_in_scorefile=True,
                     decoy_dir_name="decoys",
                     logs_dir_name="logs",
-                    ignore_errors=True,
+                    ignore_errors=False,
                     timeout=1.0,
                     sha1=None,
                     dry_run=False,
@@ -754,7 +764,7 @@ class TestReproducibilityMulti(unittest.TestCase):
                 simulation_records_in_scorefile=True,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -785,8 +795,8 @@ class TestReproducibilityMulti(unittest.TestCase):
 
     def test_reproducibility_from_reproduce(self, filter_results=False, verbose=False):
         """Test for PyRosettaCluster decoy reproducibility from instance kwargs."""
-        params_file = os.path.join(os.path.dirname(__file__), "data", "ZZZ.params")
-        self.assertTrue(os.path.isfile(params_file), msg=f"File does not exist: {params_file}")
+        params_dir = tempfile.TemporaryDirectory(prefix="tmp_params_")
+        params_file = get_test_params_file(params_dir.name)
         pyrosetta.distributed.init(
             options=f"-run:constant_seed 1 -multithreading:total_threads 1 -extra_res_fa {params_file}",
             extra_options="-out:level 300",
@@ -1234,6 +1244,7 @@ class TestReproducibilityMulti(unittest.TestCase):
                             _record["instance"][key],
                             reproduce3_record["instance"][key],
                         )
+        params_dir.cleanup()
 
     def test_reproducibility_packer_nstruct_multi_filter_results(self):
         return self.test_reproducibility_packer_nstruct_multi(filter_results=True)
@@ -1254,7 +1265,7 @@ class TestReproducibilityPoseDataFrame(unittest.TestCase):
             set_logging_handler="logging",
         )
         cls.workdir = tempfile.TemporaryDirectory()
-        cls.input_pdb_file = os.path.join(os.path.dirname(__file__), "data", "1crn.pdb")
+        cls.input_pdb_file = get_test_pdb_file(cls.workdir.name)
 
     @classmethod
     def tearDownClass(cls):

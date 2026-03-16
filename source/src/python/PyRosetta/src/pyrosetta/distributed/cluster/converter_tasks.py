@@ -28,22 +28,13 @@ import json
 import logging
 import os
 import pyrosetta.distributed.io as io
+import re
+import shutil
 import subprocess
 import warnings
 
+from contextlib import contextmanager
 from functools import singledispatch
-from pyrosetta.distributed.cluster.config import environment_cmd, source_domains
-from pyrosetta.distributed.cluster.exceptions import (
-    InputError,
-    InputFileError,
-    OutputError,
-)
-from pyrosetta.distributed.cluster.io import (
-    IO,
-    get_poses_from_init_file,
-    secure_read_pickle,
-    sign_init_file_metadata_and_poses,
-)
 from pyrosetta.distributed.packed_pose.core import PackedPose
 from pyrosetta.exceptions import PyRosettaIsNotInitializedError
 from pyrosetta.rosetta.basic import was_init_called
@@ -53,6 +44,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generator,
     Iterable,
     List,
     NoReturn,
@@ -61,6 +53,104 @@ from typing import (
     TypeVar,
     Union,
 )
+
+from pyrosetta.distributed.cluster.config import (
+    get_environment_cmd,
+    get_environment_manager,
+    source_domains,
+)
+from pyrosetta.distributed.cluster.exceptions import (
+    InputError,
+    InputFileError,
+    OutputError,
+)
+from pyrosetta.distributed.cluster.io import (
+    IO,
+    get_poses_from_init_file,
+    sanitize_urls,
+    secure_read_pickle,
+    sign_init_file_metadata_and_poses,
+)
+from pyrosetta.distributed.cluster.serialization import update_scores
+
+
+@contextmanager
+def not_on_worker() -> Generator[None, Any, None]:
+    """A context manager for running code on the host process."""
+    try:
+        distributed.get_worker()
+    except BaseException:
+        yield
+
+
+def maybe_issue_environment_warnings() -> None:
+    """
+    Issue a warning message if an environment manager is not installed and we are
+    not in an active virtual environment on the host process.
+    """
+
+    with not_on_worker():
+        environment_manager = get_environment_manager()
+        if shutil.which(environment_manager):  # An environment manager is installed
+            yml = get_yml()
+            if yml == "":
+                warnings.warn(
+                    "To use the `pyrosetta.distributed.cluster` namespace and ensure "
+                    + "reproducibility of PyRosetta simulations, please either:\n"
+                    + "(1) Create and activate a conda or mamba environment (other than 'base'). For instructions, visit:\n"
+                    + "https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html\n"
+                    + "https://conda.io/activation\n"
+                    + "https://mamba.readthedocs.io/en/latest/user_guide/mamba.html\n"
+                    + "(2) Create a uv project. For instructions, visit:\n"
+                    + "https://docs.astral.sh/uv/getting-started/installation\n"
+                    + "https://docs.astral.sh/uv/concepts/projects/init\n"
+                    + "(3) Create a pixi manifest. For instructions, visit:\n"
+                    + "https://pixi.sh/latest/installation\n"
+                    + "https://pixi.sh/latest/getting_started\n",
+                    UserWarning,
+                    stacklevel=4,
+                )  # Warn that we are not in an active virtual environment
+            else:
+                if environment_manager == "pixi": # Match `pixi.lock` format
+                    platforms = ("linux-64", "linux-aarch64", "noarch", "osx-64", "osx-arm64")
+                    conda_pyrosetta_pattern = (
+                        rf"conda: https?://({'|'.join(map(re.escape, source_domains))})/"
+                        rf"({'|'.join(platforms)})/pyrosetta-"
+                    )
+                    has_pinned_pyrosetta = (
+                        bool(re.search(conda_pyrosetta_pattern, yml)) or
+                        ("name: pyrosetta\n" in yml) # Fallback
+                    )
+                elif environment_manager == "uv": # Match uv `uv.lock` format
+                    has_pinned_pyrosetta = bool(re.search(r'^\[\[package\]\]\s*\n\s*name\s*=\s*"pyrosetta"\s*$', yml, flags=re.MULTILINE))
+                else: # Match conda/mamba `environment.yml` format
+                    has_pinned_pyrosetta = "- pyrosetta=" in yml
+                if not has_pinned_pyrosetta:
+                    warnings.warn(
+                        "The currently installed 'pyrosetta' package version is not specified in the exported environment file! "
+                        + "Consequently, the PyRosettaCluster simulation will be difficult to reproduce at a later time. "
+                        + "Note that installing PyRosetta using the PyPI 'pyrosetta-installer' package does not pin the PyRosetta "
+                        + "version to the currently activated virtual environment. To use the `pyrosetta.distributed.cluster` "
+                        + "namespace and ensure reproducibility of PyRosetta simulations, please re-install the 'pyrosetta' "
+                        + "package using the Rosetta Commons conda channel. For instructions, visit:\n"
+                        + "https://www.pyrosetta.org/downloads",
+                        UserWarning,
+                        stacklevel=4,
+                    )  # Warn that the PyRosetta package version is not specified in the active virtual environment
+        else:  # An environment manager is not installed
+            warnings.warn(
+                f"The environment manager '{environment_manager}' is not an executable! "
+                + "Use of `pyrosetta.distributed.cluster` namespace requires 'conda', 'mamba', "
+                + "'uv', or 'pixi' to be properly installed for reproducibility of PyRosetta "
+                + "simulations. Please install one of the environment managers onto your system "
+                + f"to enable running `which {environment_manager}`. For installation instructions, visit:\n"
+                + "https://docs.anaconda.com/anaconda/install\n"
+                + "https://github.com/conda-forge/miniforge\n"
+                + "https://docs.astral.sh/uv/getting-started/installation\n"
+                + "https://pixi.sh/latest/installation\n",
+                UserWarning,
+                stacklevel=4,
+            )  # Warn that environment manager is not in $PATH
 
 
 def get_protocols_list_of_str(
@@ -93,6 +183,7 @@ def get_protocols_list_of_str(
     Returns:
         A `list` object of `str` objects specifying user-defined PyRosetta protocol names.
     """
+
     _simulation_records_in_scorefile_msg = (
         "The 'scorefile' parameter argument does not contain the full simulation records. "
         + "In order to reproduce a decoy using a 'scorefile', the PyRosettaCluster "
@@ -408,37 +499,81 @@ def export_init_file(
 
 def get_yml() -> str:
     """
-    Use `conda env export` to return a YML file string with the current conda
-    enviroment, excluding certain source domains.
+    Export the current environment to a string depending on the environment manager.
     """
 
-    try:
-        raw_yml = subprocess.check_output(
-            environment_cmd,
-            shell=True,
-            stderr=subprocess.DEVNULL,
-        ).decode()
-    except subprocess.CalledProcessError:
-        raw_yml = ""
+    def remove_metadata(text: str) -> str:
+        """Remove 'name:' and 'prefix:' lines."""
+        filtered_lines = [
+            line
+            for line in text.splitlines()
+            if not line.startswith(("name:", "prefix:")) and line.strip()
+        ]
+        return "\n".join(filtered_lines) + "\n"
 
-    return (
-        (
-            os.linesep.join(
-                [
-                    line
-                    for line in raw_yml.split(os.linesep)
-                    if all(
-                        source_domain not in line for source_domain in source_domains
-                    )
-                    and all(not line.startswith(s) for s in ["name:", "prefix:"])
-                    and line
-                ]
+    env_manager = get_environment_manager()
+    environment_cmd = get_environment_cmd()
+
+    # Handle pixi separately since it writes a `pixi.lock` file
+    if env_manager == "pixi":
+        try:
+            subprocess.run(
+                environment_cmd,
+                shell=True,
+                check=True,
+                stderr=subprocess.DEVNULL,
             )
-            + os.linesep
-        )
-        if raw_yml
-        else raw_yml
-    )
+            # https://pixi.sh/dev/reference/environment_variables/#environment-variables-set-by-pixi
+            manifest_path = os.environ.get("PIXI_PROJECT_MANIFEST")
+            lock_path = os.path.join(
+                os.path.dirname(manifest_path) if manifest_path else os.getcwd(),
+                "pixi.lock",
+            )
+            with open(lock_path, encoding="utf-8") as f:
+                return sanitize_urls(f.read())
+        except Exception:
+            return ""
+
+    # Handle uv separately since it writes a `uv.lock` file
+    if env_manager == "uv":
+        try:
+            subprocess.run(
+                environment_cmd,
+                shell=True,
+                check=True,
+                stderr=subprocess.DEVNULL,
+            )
+            # https://docs.astral.sh/uv/reference/environment/#uv_project
+            project_dir = os.environ.get("UV_PROJECT")
+            lock_path = os.path.join(
+                project_dir if project_dir else os.getcwd(),
+                "uv.lock",
+            )
+            with open(lock_path, encoding="utf-8") as f:
+                return f.read()  # Not sanitized, since uv doesn't use conda channels
+        except Exception:
+            return ""
+
+    # For conda/mamba environment managers, run the export command and process the output
+    if env_manager in ("conda", "mamba"):
+        try:
+            result = subprocess.run(
+                environment_cmd,
+                shell=True,
+                check=True,
+                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            return ""
+
+        raw_yml = result.stdout.strip()
+        if not raw_yml:
+            return ""
+        return sanitize_urls(remove_metadata(raw_yml))
+
+    raise RuntimeError(f"Unsupported environment manager: '{env_manager}'")
 
 
 @singledispatch
@@ -552,6 +687,19 @@ def _parse_str(obj: str) -> Dict[str, Any]:
 
 
 @singledispatch
+def parse_input_file_to_instance_metadata_kwargs(obj: Any) -> NoReturn:
+    raise InputFileError(obj)
+
+
+@parse_input_file_to_instance_metadata_kwargs.register(PackedPose)
+@parse_input_file_to_instance_metadata_kwargs.register(Pose)
+@parse_input_file_to_instance_metadata_kwargs.register(str)
+def _parse_str(obj: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    scores_dict = get_scores_dict(obj)
+    return scores_dict["instance"], scores_dict["metadata"]
+
+
+@singledispatch
 def parse_scorefile(obj: Any) -> NoReturn:
     raise TypeError(
         "The `scorefile` argument parameter must be of type `str`, "
@@ -581,6 +729,23 @@ def _from_str(obj: str) -> str:
     return obj
 
 
+def _merge_and_update_scores(
+    packed: PackedPose, _reserved_scores_dict: Dict[str, Any]
+) -> PackedPose:
+    _new_scores_dict = dict(update_scores(packed).pose.cache)
+    _merged_scores_dict = toolz.dicttoolz.merge(_reserved_scores_dict, _new_scores_dict)
+    _reserved_scoretypes = packed.pose.cache._reserved
+    _resolved_scores_dict = toolz.dicttoolz.keyfilter(
+        lambda k: k not in _new_scores_dict and k not in _reserved_scoretypes,
+        _merged_scores_dict,
+    )
+    logging.info(
+        "The `reserve_scores` decorator function is automatically restoring "
+        f"the following keys into the `Pose.cache` dictionary: {tuple(_resolved_scores_dict)}"
+    )
+    return packed.update_scores(_resolved_scores_dict)
+
+
 @singledispatch
 def reserve_scores_in_results(
     obj: Any, _scores_dict: Dict[Any, Any], protocol_name: str
@@ -594,7 +759,7 @@ def _parse_packed(
     obj: Union[Pose, PackedPose], _scores_dict: Dict[Any, Any], protocol_name: str
 ) -> List[PackedPose]:
     packed = to_packed(obj, protocol_name)
-    packed.scores = toolz.dicttoolz.merge(_scores_dict, packed.scores)
+    packed = _merge_and_update_scores(packed, _scores_dict)
     return [packed]
 
 
@@ -606,7 +771,7 @@ def _parse_iterable(
     for obj in objs:
         packed = to_packed(obj, protocol_name)
         if isinstance(packed, PackedPose):
-            packed.scores = toolz.dicttoolz.merge(_scores_dict, packed.scores)
+            packed = _merge_and_update_scores(packed, _scores_dict)
         out.append(packed)
     return out
 

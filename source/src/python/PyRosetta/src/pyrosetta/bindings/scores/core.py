@@ -9,6 +9,7 @@
 __author__ = "Jason C. Klima"
 
 
+import itertools
 import types
 
 try:
@@ -41,6 +42,11 @@ class PoseCacheAccessor(PoseCacheAccessorBase, MutableMapping):
     get clobbered once combined. The `Pose.cache` dictionary also uses serialization to dynamically store/retrieve
     arbitrary python objects to/from base64-encoded pickled byte streams, and stores/retrieves `float` and `str`
     objects without serialization.
+
+    **Warning**: ONLY LOAD DATA YOU TRUST. The pose.cache dictionary uses the pickle module to serialze and deserialize arbitrary scores in the Pose object. 
+    When depickling (deserializing) is performed arbitrary code can be executed, learn more `here <https://docs.python.org/3/library/pickle.html>`_.
+    The pose.cache object is only stored in memory, so this is only a risk if these objects are sent to a user in memory over a network
+    such as a socket, queue, shared cache, etc. If you need to retrieve a pose.cache dictionary this way please make sure it is from a trusted source.
 
     Examples:
 
@@ -171,16 +177,20 @@ class PoseCacheAccessor(PoseCacheAccessorBase, MutableMapping):
     @property
     def all_keys(self):
         """Return a tuple of all score data keys."""
-        ref_keys = []
-        for k1, v1 in self.all_scores.items():
-            for k2, v2 in v1.items():
-                if k1 == "energies":
-                    ref_keys.append(k2)
-                else:
-                    for k3 in v2.keys():
-                        ref_keys.append(k3)
-
-        return tuple(ref_keys)
+        return tuple(
+            itertools.chain(
+                self.extra.string,
+                self.extra.real,
+                self.metrics.string,
+                self.metrics.real,
+                self.metrics.composite_string,
+                self.metrics.composite_real,
+                self.metrics.per_residue_string,
+                self.metrics.per_residue_real,
+                self.metrics.per_residue_probabilities,
+                self.energies,
+            )
+        )
 
     def assert_unique_keys(self):
         """Assert that `Pose.cache.all_keys` returns all unique keys."""

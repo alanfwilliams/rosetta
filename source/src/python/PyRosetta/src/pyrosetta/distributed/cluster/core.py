@@ -143,14 +143,16 @@ Args:
         This option just adds the user-provided `simulation_name` to the scorefile
         for accounting.
         Default: `project_name` if not specified, else "PyRosettaCluster" if None
-    environment: A `NoneType` or `str` object specifying the active conda environment
-        YML file string. If a `NoneType` object is provided, then generate a YML file
-        string for the active conda environment and save it to the full simulation
-        record. If a non-empty `str` object is provided, then validate it against the
-        active conda environment YML file string and save it to the full simulation record.
-        This ensures that reproduction simulations use an identical conda environment from
-        the original simulation. To bypass conda environment validation with a warning
-        message, an empty string ('') may be provided (but does not ensure reproducibility).
+    environment: A `NoneType` or `str` object specifying either the active conda/mamba environment
+        YML file string, active uv project `uv.lock` file string, or active pixi project
+        `pixi.lock` file string. If a `NoneType` object is provided, then generate an environment file
+        string for the active conda/mamba/uv/pixi environment and save it to the full simulation
+        record. If a non-empty `str` object is provided, then validate it against the active
+        conda/mamba/uv/pixi environment YML/lock file string and save it to the
+        full simulation record. This ensures that reproduction simulations use an identical
+        conda/mamba/uv/pixi environment to the original simulation. To bypass conda/mamba/uv/pixi
+        environment validation with a warning message, an empty string ('') may be provided (but
+        does not ensure reproducibility).
         Default: None
     output_path: A `str` object specifying the full path of the output directory
         (to be created if it doesn't exist) where the output results will be saved
@@ -188,6 +190,10 @@ Args:
         be analyzed using `pyrosetta.distributed.cluster.io.secure_read_pickle(compression="infer")`.
         Note that in order to save pickled `pandas.DataFrame` objects, please ensure
         that `pyrosetta.secure_unpickle.add_secure_package("pandas")` has been first run.
+        If using `pandas` version `>=3.0.0`, PyArrow-backed datatypes may be enabled by default;
+        in this case, please ensure that `pyrosetta.secure_unpickle.add_secure_package("pyarrow")`
+        has also been first run. See https://pandas.pydata.org/pdeps/0010-required-pyarrow-dependency.html
+        and https://pandas.pydata.org/pdeps/0014-string-dtype.html for more information.
         Default: [".json",]
     scorefile_name: A `str` object specifying the name of the output JSON-formatted
         scorefile, which must end in ".json". The scorefile location is always
@@ -203,9 +209,11 @@ Args:
         curtailed simulation records to the scorefile. This results in minimally
         redundant information on each line, disallowing downstream reproduction
         of a decoy from the scorefile, but a smaller scorefile. If `False`, also
-        write the active conda environment to a YML file in 'output_path'. Full
-        simulation records are always written to the output '.pdb' or '.pdb.bz2'
-        file(s), which can be used to reproduce any decoy without the scorefile.
+        write the active conda/mamba/uv/pixi environment to a file in the `output_path`
+        keyword argument parameter. Full simulation records are always written to the
+        output decoy files (the types of which are specified by the `output_decoy_types`
+        keyword argument parameter), which can be used to reproduce any decoy without
+        the scorefile.
         Default: False
     decoy_dir_name: A `str` object specifying the directory name where the
         output decoys will be saved. The directory location is always
@@ -361,8 +369,10 @@ import uuid
 
 from datetime import datetime
 from pyrosetta.distributed.cluster.base import TaskBase, _get_residue_type_set
+from pyrosetta.distributed.cluster.config import get_environment_manager
 from pyrosetta.distributed.cluster.converters import (
     is_empty as _is_empty,
+    _maybe_issue_environment_warnings,
     _parse_decoy_ids,
     _parse_filter_results,
     _parse_environment,
@@ -825,6 +835,15 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         validator=[attr.validators.instance_of(str), _validate_output_init_file],
         converter=attr.converters.default_if_none(""),
     )
+    environment_manager = attr.ib(
+        type=str,
+        default=attr.Factory(
+            get_environment_manager,
+            takes_self=False,
+        ),
+        init=False,
+        validator=attr.validators.instance_of(str),
+    )
     environment_file = attr.ib(
         type=str,
         default=attr.Factory(
@@ -834,7 +853,13 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                     [
                         self.project_name.replace(" ", "-"),
                         self.simulation_name.replace(" ", "-"),
-                        "environment.yml",
+                        (
+                            "pixi.lock"
+                            if self.environment_manager == "pixi"
+                            else "uv.lock"
+                            if self.environment_manager == "uv"
+                            else "environment.yml"
+                        )
                     ]
                 ),
             ),
@@ -853,9 +878,13 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         ),
     )
 
+    def __attrs_pre_init__(self) -> None:
+        _maybe_issue_environment_warnings()
+
     def __attrs_post_init__(self) -> None:
         _maybe_init_client()
         self._setup_logger()
+        self._cache_toml()
         self._write_environment_file(self.environment_file)
         self._write_init_file()
         self.serializer = Serialization(compression=self.compression)
@@ -882,6 +911,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         extra_args: Dict[str, Any],
         passkey: bytes,
         resource: Optional[Dict[Any, Any]],
+        priority: Optional[int],
+        retry: Optional[int],
     ) -> Future:
         """Scatter data and return submitted 'user_spawn_thread' future."""
         task_id = uuid.uuid4().hex
@@ -901,7 +932,21 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
             broadcast=False,
             hash=False,
         )
-        return client.submit(user_spawn_thread, *scatter, pure=False, resources=resource)
+        submit_kwargs = {"pure": False}
+        # Omit resources keyword argument for distributed versions <2.1.0
+        # or use default if user specifies `resources=None` in distributed versions >=2.1.0
+        if resource is not None:
+            submit_kwargs["resources"] = resource
+        # Omit priority keyword argument for distributed versions <1.21.0
+        # or use default if user specifies `priorities=None` in distributed versions >=1.21.0
+        if priority is not None:
+            submit_kwargs["priority"] = priority
+        # Omit retries keyword argument for distributed versions <1.20.0
+        # or use default if user specifies `retries=None` for distributed versions >=1.20.0
+        if retry is not None:
+            submit_kwargs["retries"] = retry
+
+        return client.submit(user_spawn_thread, *scatter, **submit_kwargs)
 
     def _run(
         self,
@@ -909,6 +954,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         protocols: Any = None,
         clients_indices: Any = None,
         resources: Any = None,
+        priorities: Any = None,
+        retries: Any = None,
     ) -> Union[NoReturn, Generator[Tuple[PackedPose, Dict[Any, Any]], None, None]]:
         """
         Run user-provided PyRosetta protocols on a local or remote compute cluster using
@@ -955,7 +1002,19 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                 clients_indices=[0, 1],
                 resources=[{"GPU": 2}, {"MEMORY": 100e9}],
             )
-            
+
+            # Run protocols with depth-first task execution:
+            PyRosettaCluster().distribute(
+                protocols=[protocol_1, protocol_2, protocol_3, protocol_4],
+                priorities=[0, 10, 20, 30],
+            )
+
+            # Run protocols with up to three retries per failed task during `protocol_3` and `protocol_4`:
+            PyRosettaCluster().distribute(
+                protocols=[protocol_1, protocol_2, protocol_3, protocol_4],
+                retries=[0, 0, 3, 3],
+            )
+
         Args:
             *args: Optional instances of type `types.GeneratorType` or `types.FunctionType`,
                 in the order of protocols to be executed.
@@ -966,7 +1025,7 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                 Default: None
             clients_indices: An optional `list` or `tuple` object of `int` objects, where each `int` object represents
                 a zero-based index corresponding to the initialized dask `distributed.client.Client` object(s) passed 
-                to the `PyRosettaCluster(clients=...)` class attribute. If not `None`, then the length of the 
+                to the `PyRosettaCluster(clients=...)` keyword argument parameter. If not `None`, then the length of the
                 `clients_indices` object must equal the number of protocols passed to the `PyRosettaCluster().distribute`
                 method.
                 Default: None
@@ -983,14 +1042,56 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                 applied, the protocols will not run. See https://distributed.dask.org/en/stable/resources.html for more
                 information.
                 Default: None
+            priorities: An optional `list` or `tuple` of `int` objects, where each `int` object sets the dask scheduler
+                priority for the corresponding user-defined PyRosetta protocol (i.e., indexed the same as `client_indices`).
+                If `None`, then no explicit priorities are set. If not `None`, then the length of the `priorities` object
+                must equal the number of protocols passed to the `PyRosettaCluster().distribute` method, and each `int`
+                value determines the dask scheduler priority for that protocol's received tasks.
+                Breadth-first task execution (default):
+                    When all user-defined PyRosetta protocols have an identical priority (e.g., `[0] * len(protocols)` or
+                    `None`), then all tasks enter the dask scheduler's queue with equal priority. Under equal priority, dask
+                    mainly schedules tasks in a first-in, first-out manner. When dask worker resources are saturated, this
+                    causes all tasks submitted to upstream protocols to run to completion before tasks are scheduled to run
+                    downstream protocols, producing a breadth-first task execution behavior across user-defined PyRosetta
+                    protocols.
+                Depth-first task execution:
+                    To allow tasks to run through all user-defined PyRosetta protocols before all tasks submitted to
+                    upstream protocols complete, assign increasing priorities to downstream protocols (e.g.,
+                    `list(range(0, len(protocols) * 10, 10))`). Once a task completes an upstream protocol, it is submitted
+                    to the next downstream protocol with a higher priority than tasks still queued for upstream protocols,
+                    so tasks may run through all user-defined PyRosetta protocols to completion as dask worker resources
+                    become available. This produces a depth-first task execution behavior across user-defined PyRosetta
+                    protocols when dask worker resources are saturated.
+                See https://distributed.dask.org/en/stable/priority.html for more information.
+                Default: None
+            retries: An optional `list` or `tuple` of `int` objects, where each `int` object (≥0) sets the number of allowed
+                automatic retries of each failed task that was submitted to the corresponding user-provided PyRosetta protocol
+                (i.e., indexed the same as `client_indices`). If an `int` object (≥0) is provided, then apply that number of
+                allowed automatic retries to all user-provided PyRosetta protocols. If `None`, then no explicit retries are
+                allowed. If not `None` and not an `int` object, then the length of the `retries` parameter must equal the number
+                of protocols passed to the `PyRosettaCluster().distribute` method, and each `int` value determines the number
+                of automatic retries the dask scheduler allows for that protocol's failed tasks. Allowing retries of failed tasks
+                may be useful if remote compute resources are subject to preemption (e.g., cloud spot instances or backfill
+                queues). Note that retries are only appropriate for user-provided PyRosetta protocols that are side effect-free
+                upon preemption, in which tasks can be restarted without producing inconsistent external states if preempted midway
+                through the protocol. Also note that if `PyRosettaCluster(ignore_errors=True)` is used, then protocols failing due
+                to standard Python exceptions or Rosetta segmentation faults will still be considered successes, and this
+                keyword argument parameter has no effect on them since these protocol errors are ignored. However, if a compute
+                resource executing tasks is reclaimed midway through a protocol, then the dask scheduler registers those tasks
+                as incomplete, and they may be retried a certain number of times based on this keyword argument parameter.
+                See https://distributed.dask.org/en/latest/scheduling-state.html#task-state for more information.
+                Default: None
         """
         yield_results = _parse_yield_results(self.yield_results)
         clients, cluster, adaptive = self._setup_clients_cluster_adaptive()
         self._setup_task_security_plugin(clients)
         socket_listener_address, passkey = self._setup_socket_listener(clients)
         compressed_input_packed_pose = self.serializer.compress_packed_pose(self.input_packed_pose)
-        protocols, protocol, seed, clients_index, resource = self._setup_protocols_protocol_seed(
-            args, protocols, clients_indices, resources
+        resources = self._parse_resources(resources)
+        priorities = self._parse_priorities(priorities)
+        retries = self._parse_retries(retries)
+        protocols, protocol, seed, clients_index, resource, priority, retry = self._setup_protocols_protocol_seed(
+            args, protocols, clients_indices, resources, priorities, retries
         )
         protocol_name = protocol.__name__
         compressed_protocol = self.serializer.compress_object(protocol)
@@ -1022,6 +1123,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                     extra_args,
                     passkey,
                     resource,
+                    priority,
+                    retry,
                 )
                 for _ in range(self.nstruct)
                 for compressed_kwargs, pyrosetta_init_kwargs in (
@@ -1056,8 +1159,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                         )
                     if self.filter_results and _is_empty(self.serializer.decompress_packed_pose(compressed_packed_pose)):
                         continue
-                    compressed_kwargs, pyrosetta_init_kwargs, protocol, clients_index, resource = self._setup_kwargs(
-                        kwargs, clients_indices, resources
+                    compressed_kwargs, pyrosetta_init_kwargs, protocol, clients_index, resource, priority, retry = self._setup_kwargs(
+                        kwargs, clients_indices, resources, priorities, retries
                     )
                     protocol_name = protocol.__name__
                     compressed_protocol = self.serializer.compress_object(protocol)
@@ -1072,6 +1175,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
                             extra_args,
                             passkey,
                             resource,
+                            priority,
+                            retry,
                         )
                     )
                     self.tasks_size += 1
@@ -1087,6 +1192,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         protocols: Any = None,
         clients_indices: Any = None,
         resources: Any = None,
+        priorities: Any = None,
+        retries: Any = None,
     ) -> Union[NoReturn, Generator[Tuple[PackedPose, Dict[Any, Any]], None, None]]:
         if self.sha1 != "":
             logging.warning(
@@ -1102,6 +1209,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
             protocols=protocols,
             clients_indices=clients_indices,
             resources=resources,
+            priorities=priorities,
+            retries=retries,
         ):
             yield result
 
@@ -1111,6 +1220,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
         protocols: Any = None,
         clients_indices: Any = None,
         resources: Any = None,
+        priorities: Any = None,
+        retries: Any = None,
     ) -> Optional[NoReturn]:
         self.yield_results = False
         for _ in self._run(
@@ -1118,6 +1229,8 @@ class PyRosettaCluster(IO[G], LoggingSupport[G], SchedulerManager[G], SecurityIO
             protocols=protocols,
             clients_indices=clients_indices,
             resources=resources,
+            priorities=priorities,
+            retries=retries,
         ):
             pass
 

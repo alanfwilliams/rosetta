@@ -13,7 +13,9 @@ __author__ = "Jason C. Klima"
 
 
 import bz2
+import collections
 import glob
+import inspect
 import json
 import logging
 import numpy
@@ -80,7 +82,9 @@ from pyrosetta.distributed.cluster.io import (
     secure_read_pickle,
     sign_init_file_metadata_and_poses,
     verify_init_file,
+    _is_pandas_object_pyarrow_backed,
 )
+from pyrosetta.distributed.cluster.multiprocessing import run_protocol, user_protocol
 
 
 class SmokeTest(unittest.TestCase):
@@ -178,8 +182,9 @@ class SmokeTest(unittest.TestCase):
                 print("Using the installed 'cryptography' package to generate a dask `Security.temporary()` object...")
                 run(**instance_kwargs)
             else:
-                with self.assertRaises(ImportError):
+                with self.assertRaises(ImportError) as ex:
                     run(**instance_kwargs)
+                print(f"Successfully caught exception: {ex.exception}")
 
     def test_ignore_errors(self):
         """Test PyRosettaCluster usage with user-provided PyRosetta protocol error."""
@@ -558,10 +563,15 @@ class SmokeTestMulti(unittest.TestCase):
             import pyrosetta  # noqa
             import pyrosetta.distributed.io as io  # noqa
 
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra.real)
+            self.assertEqual(packed_pose.pose.cache.extra.real["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache.extra["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
+
             packed_pose.scores.clear()
             self.assertDictEqual({}, packed_pose.scores)
             pose = io.to_pose(packed_pose)
@@ -605,10 +615,14 @@ class SmokeTestMulti(unittest.TestCase):
             import pyrosetta
             import pyrosetta.distributed.io as io
 
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra.real)
+            self.assertEqual(packed_pose.pose.cache.extra.real["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache.extra["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
 
             self.assertIn("task_packed_pose", kwargs)
             self.assertIsInstance(kwargs["task_packed_pose"], PackedPose)
@@ -636,6 +650,8 @@ class SmokeTestMulti(unittest.TestCase):
             self.assertNotIn("task_packed_pose", kwargs["PyRosettaCluster_task"])
             self.assertIn("saved_packed_pose", kwargs)
             self.assertIsInstance(kwargs["saved_packed_pose"], PackedPose)
+            tmp_path = kwargs["PyRosettaCluster_tmp_path"]
+            self.assertTrue(os.path.exists(tmp_path))
 
             yield None
             yield kwargs
@@ -650,6 +666,8 @@ class SmokeTestMulti(unittest.TestCase):
             self.assertIsInstance(kwargs, dict)
             self.assertIn("saved_packed_pose", kwargs)
             self.assertIsInstance(kwargs["saved_packed_pose"], PackedPose)
+            tmp_path = kwargs["PyRosettaCluster_tmp_path"]
+            self.assertTrue(os.path.exists(tmp_path))
 
             return kwargs
 
@@ -741,7 +759,7 @@ class SmokeTestMulti(unittest.TestCase):
                 simulation_records_in_scorefile=False,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 max_delay_time=3.0,
                 sha1=None,
@@ -790,22 +808,40 @@ class SmokeTestMulti(unittest.TestCase):
             import pyrosetta  # noqa
             import pyrosetta.distributed.io as io
 
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
+            if kwargs["PyRosettaCluster_protocol_number"] == 1:
+                self.assertEqual(kwargs["PyRosettaCluster_protocol_name"], "my_second_protocol")
+                self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra)
+                self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.extra.real)
+                self.assertEqual(packed_pose.pose.cache.extra.real["test_setPoseExtraScore"], 123.0)
+                self.assertEqual(packed_pose.pose.cache.extra["test_setPoseExtraScore"], 123.0)
+            elif kwargs["PyRosettaCluster_protocol_number"] == 2:
+                self.assertEqual(kwargs["PyRosettaCluster_protocol_name"], "my_third_protocol")
+                self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics)
+                self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics.real)
+                self.assertEqual(packed_pose.pose.cache.metrics.real["test_setPoseExtraScore"], 123.0)
+                self.assertEqual(packed_pose.pose.cache.metrics["test_setPoseExtraScore"], 123.0)
             packed_pose.scores.clear()
             self.assertDictEqual({}, packed_pose.scores)
             self.assertIn(kwargs["PyRosettaCluster_protocol_number"], [1, 2])
             pose = io.to_pose(packed_pose)
+            pose.cache.clear() # Clear scoreterms from `pose.cache.extra.real`
             for _ in range(3):
                 yield pose.clone()
 
         def my_third_protocol(packed_pose, **kwargs):
-            self.assertEqual(
-                dict(packed_pose.scores),
-                {**dict(packed_pose.scores), **{"test_setPoseExtraScore": 123}},
-            )
+            self.assertIsInstance(packed_pose.scores, dict)
+            self.assertEqual(packed_pose.scores, {})
+            # `reserve_scores` decorator on 'my_second_protocol' sets scoreterms in `packed_pose.pose.cache.metrics`
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.all_keys)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics)
+            self.assertIn("test_setPoseExtraScore", packed_pose.pose.cache.metrics.real)
+            self.assertEqual(packed_pose.pose.cache.metrics.real["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache.metrics["test_setPoseExtraScore"], 123.0)
+            self.assertEqual(packed_pose.pose.cache["test_setPoseExtraScore"], 123.0)
             self.assertEqual(kwargs["PyRosettaCluster_protocol_number"], 2)
             return my_second_protocol(packed_pose, **kwargs)
 
@@ -839,7 +875,7 @@ class SmokeTestMulti(unittest.TestCase):
                 simulation_records_in_scorefile=False,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -880,7 +916,7 @@ class SmokeTestMulti(unittest.TestCase):
                 simulation_records_in_scorefile=False,
                 decoy_dir_name="decoys",
                 logs_dir_name="logs",
-                ignore_errors=True,
+                ignore_errors=False,
                 timeout=1.0,
                 sha1=None,
                 dry_run=False,
@@ -1282,65 +1318,90 @@ class SerializationTest(unittest.TestCase):
                 output_packed_pose = serializer.decompress_packed_pose(compressed_packed_pose)
 
                 _error_msg = f"Failed on test case {_test_case} with compression {_compression}"
-                if _compression in (False, None):
-                    self.assertEqual(
-                        sys.getsizeof(compressed_packed_pose.pickled_pose),
-                        sys.getsizeof(input_packed_pose.pickled_pose),
-                        msg=_error_msg,
-                    )
-                    self.assertEqual(
-                        sys.getsizeof(compressed_packed_pose.pickled_pose),
-                        sys.getsizeof(output_packed_pose.pickled_pose),
-                        msg=_error_msg,
-                    )
-                else:
-                    self.assertLess(
-                        sys.getsizeof(compressed_packed_pose),
-                        sys.getsizeof(input_packed_pose.pickled_pose),
-                        msg=_error_msg,
-                    )
-                    self.assertLess(
-                        sys.getsizeof(compressed_packed_pose),
-                        sys.getsizeof(output_packed_pose.pickled_pose),
-                        msg=_error_msg,
-                    )
-                if _compression in (False, None):
-                    self.assertEqual(id(input_packed_pose), id(output_packed_pose), msg=_error_msg)
-                else:
-                    self.assertNotEqual(id(input_packed_pose), id(output_packed_pose), msg=_error_msg)
-                self.assertEqual(scores, output_packed_pose.scores, msg=_error_msg)
-                self.assertSetEqual(
-                    set(input_packed_pose.scores.keys()),
-                    set(output_packed_pose.scores.keys()),
-                    msg=_error_msg,
-                )
-                for scoretype in input_packed_pose.scores.keys():
-                    input_value = input_packed_pose.scores[scoretype]
-                    output_value = output_packed_pose.scores[scoretype]
-                    if isinstance(input_value, str):
-                        self.assertEqual(input_value, output_value, msg=_error_msg)
-                    elif isinstance(input_value, (int, float)):
-                        self.assertAlmostEqual(input_value, output_value, places=6, msg=_error_msg)
 
-                if _compression not in (False, None):
+                if _compression in (False, None):
+                    # Test PackedPose size
                     if _test_case == 0:
-                        self.assertEqual(scores, input_packed_pose.scores, msg=_error_msg)
-                        self.assertEqual(
-                            input_packed_pose.scores, output_packed_pose.scores, msg=_error_msg
-                        )
-                        self.assertNotEqual(
-                            input_packed_pose.pickled_pose,
-                            output_packed_pose.pickled_pose,
+                        self.assertGreater(
+                            sys.getsizeof(compressed_packed_pose.pickled_pose),
+                            sys.getsizeof(input_packed_pose.pickled_pose),
                             msg=_error_msg,
-                        )
+                        ) # `PackedPose.scores` get cached in `Pose.cache`
                     elif _test_case in (1, 2):
-                        self.assertEqual(scores, input_packed_pose.scores, msg=_error_msg)
-                        self.assertEqual(input_packed_pose.scores, output_packed_pose.scores, msg=_error_msg)
                         self.assertEqual(
-                            input_packed_pose.pickled_pose,
-                            output_packed_pose.pickled_pose,
+                            sys.getsizeof(compressed_packed_pose.pickled_pose),
+                            sys.getsizeof(input_packed_pose.pickled_pose),
                             msg=_error_msg,
-                        )
+                        ) # `PackedPose.scores` are already cached in `Pose.cache`
+                    self.assertEqual(
+                        sys.getsizeof(compressed_packed_pose.pickled_pose),
+                        sys.getsizeof(output_packed_pose.pickled_pose),
+                        msg=_error_msg,
+                    ) # `PackedPose.scores` are already cached in `Pose.cache`
+                    # Test PackedPose identity
+                    self.assertEqual(id(compressed_packed_pose), id(output_packed_pose), msg=_error_msg)
+                else:
+                    # Test PackedPose size
+                    self.assertLess(
+                        sys.getsizeof(compressed_packed_pose),
+                        sys.getsizeof(input_packed_pose.pickled_pose),
+                        msg=_error_msg,
+                    )
+                    self.assertLess(
+                        sys.getsizeof(compressed_packed_pose),
+                        sys.getsizeof(output_packed_pose.pickled_pose),
+                        msg=_error_msg,
+                    )
+                    # Test PackedPose identity
+                    self.assertNotEqual(id(compressed_packed_pose), id(output_packed_pose), msg=_error_msg)
+                # Test PackedPose identity
+                self.assertNotEqual(id(input_packed_pose), id(compressed_packed_pose), msg=_error_msg)
+                self.assertNotEqual(id(input_packed_pose), id(output_packed_pose), msg=_error_msg)
+                # Test PackedPose scores
+                if _test_case == 0: # Compression has no effect when user doesn't cache scores in Pose object
+                    self.assertNotEqual(input_packed_pose.pose.cache, scores, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.scores, scores, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.pose.cache, {}, msg=_error_msg)
+                    self.assertEqual(output_packed_pose.scores, {}, msg=_error_msg)
+                    self.assertEqual(output_packed_pose.pose.cache, scores, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.scores, output_packed_pose.pose.cache, msg=_error_msg)
+                    self.assertEqual(output_packed_pose.pose.cache, scores, msg=_error_msg)
+                    self.assertSetEqual(
+                        set(input_packed_pose.scores.keys()),
+                        set(output_packed_pose.pose.cache.all_keys),
+                        msg=_error_msg,
+                    )
+                    for scoretype in input_packed_pose.scores.keys():
+                        input_value = input_packed_pose.scores[scoretype]
+                        output_value = output_packed_pose.pose.cache[scoretype]
+                        self.assertEqual(input_value, output_value, msg=_error_msg)
+                    self.assertNotEqual(
+                        input_packed_pose.pickled_pose,
+                        output_packed_pose.pickled_pose,
+                        msg=_error_msg,
+                    )
+                elif _test_case in (1, 2): # Compression has no effect when user caches scores in Pose object (preferred syntax)
+                    self.assertNotEqual(input_packed_pose.scores, scores, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.scores, {}, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.pose.cache, scores, msg=_error_msg)
+                    self.assertEqual(output_packed_pose.scores, {}, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.scores, output_packed_pose.scores, msg=_error_msg)
+                    self.assertEqual(output_packed_pose.pose.cache, scores, msg=_error_msg)
+                    self.assertEqual(input_packed_pose.pose.cache, output_packed_pose.pose.cache, msg=_error_msg)
+                    self.assertSetEqual(
+                        set(input_packed_pose.pose.cache.all_keys),
+                        set(output_packed_pose.pose.cache.all_keys),
+                        msg=_error_msg,
+                    )
+                    for scoretype in input_packed_pose.pose.cache.all_keys:
+                        input_value = input_packed_pose.pose.cache[scoretype]
+                        output_value = output_packed_pose.pose.cache[scoretype]
+                        self.assertEqual(input_value, output_value, msg=_error_msg)
+                    self.assertEqual(
+                        input_packed_pose.pickled_pose,
+                        output_packed_pose.pickled_pose,
+                        msg=_error_msg,
+                    )
 
 
 class MultipleClientsTest(unittest.TestCase):
@@ -1799,6 +1860,23 @@ class ScoresTest(unittest.TestCase):
 
         return packed_pose
 
+    @staticmethod
+    def protocol_with_secure_package_pandas(packed_pose, **kwargs):
+        assert "pandas" not in pyrosetta.secure_unpickle.get_secure_packages()
+        pyrosetta.secure_unpickle.add_secure_package("pandas")
+        assert "pandas" in pyrosetta.secure_unpickle.get_secure_packages()
+        if "secure_packages" in kwargs and "pyarrow" in kwargs["secure_packages"]:
+            assert "pyarrow" not in pyrosetta.secure_unpickle.get_secure_packages()
+            pyrosetta.secure_unpickle.add_secure_package("pyarrow")
+            assert "pyarrow" in pyrosetta.secure_unpickle.get_secure_packages()
+        _ = packed_pose.pose.cache["df"]
+        return packed_pose
+
+    @staticmethod
+    def protocol_without_secure_package_pandas(packed_pose, **kwargs):
+        _ = packed_pose.pose.cache["df"]
+        return packed_pose
+
     def get_scores_dict(self, output_path):
         decoy_files = glob.glob(os.path.join(output_path, self.decoy_dir_name, "*", "*.bz2"))
         self.assertEqual(len(decoy_files), 1)
@@ -1886,6 +1964,69 @@ class ScoresTest(unittest.TestCase):
                     msg=f"Saving score '{key}' failed with compression={compression}",
                 )
                 self.assertEqual(scores_dict["scores"][key], ScoresTest._value)
+
+    def test_secure_packages_billiard(self):
+        """
+        Test caching a `pandas.DataFrame` with and without adding 'pandas'
+        as a secure package in the billiard subprocess.
+        """
+        pyrosetta.secure_unpickle.add_secure_package("pandas")
+        df = pandas.DataFrame().from_dict({0: ["foo"], 1: ["bar"]})
+        if _is_pandas_object_pyarrow_backed(df):
+            # If the cached `pandas.DataFrame` object uses Arrow-backed dtypes, then
+            # PyRosetta requires 'pyarrow' to be in the unpickle-allowed list during
+            # output decoy parsing. Certain `pandas` versions (with Python-3.13+)
+            # use Arrow-backed dtypes for `pandas.DataFrame` objects by default.
+            pyrosetta.secure_unpickle.add_secure_package("pyarrow")
+        input_pose = self.input_packed_pose.pose.clone()
+        input_pose.cache["df"] = df # Cache `pandas.DataFrame` object
+        secure_packages = pyrosetta.secure_unpickle.get_secure_packages()
+        # Test a protocol that does not add 'pandas' to the unpickle-allowed list,
+        # and does not access the cached `pandas.DataFrame`; this tests that
+        # PyRosettaCluster infrastructure does not trigger deserialization alone
+        run(
+            **{
+                **self.instance_kwargs,
+                "tasks": [{**task, "secure_packages": secure_packages} for task in ScoresTest.create_task()],
+                "input_packed_pose": input_pose.clone(),
+                "output_path": os.path.join(self.workdir.name, "test_secure_packages_billiard_1"),
+                "ignore_errors": False,
+                "protocols": ScoresTest.identity_protocol,
+            }
+        )
+        # Test a protocol that adds 'pandas' to the unpickle-allowed list, and
+        # accesses the cached `pandas.DataFrame`; this tests that the billiard
+        # subprocess requires adding 'pandas' to the unpickle-allowed list
+        # before data access, even though the client process has already added it
+        run(
+            **{
+                **self.instance_kwargs,
+                "tasks": [{**task, "secure_packages": secure_packages} for task in ScoresTest.create_task()],
+                "input_packed_pose": input_pose.clone(),
+                "output_path": os.path.join(self.workdir.name, "test_secure_packages_billiard_2"),
+                "ignore_errors": False,
+                "protocols": ScoresTest.protocol_with_secure_package_pandas,
+            }
+        )
+        _sep = "*" * 60
+        print(f"{_sep} Begin testing expected `UnpickleSecurityError` in billiard subprocess {_sep}")
+        with self.assertRaises(WorkerError):
+            # Test a protocol that does not add 'pandas' to the unpickle-allowed list,
+            # and then accesses the cached `pandas.DataFrame`; this tests that the
+            # billiard subprocess requires adding 'pandas' to the unpickle-allowed list
+            # before data access, even though the client process has already added it,
+            # leading to an intentionally raised `WorkerError` exception
+            run(
+                **{
+                    **self.instance_kwargs,
+                    "tasks": [{**task, "secure_packages": secure_packages} for task in ScoresTest.create_task()],
+                    "input_packed_pose": input_pose.clone(),
+                    "output_path": os.path.join(self.workdir.name, "test_secure_packages_billiard_3"),
+                    "ignore_errors": False,
+                    "protocols": ScoresTest.protocol_without_secure_package_pandas,
+                }
+            )
+        print(f"{_sep} End testing expected `UnpickleSecurityError` in billiard subprocess {_sep}")
 
 
 class TestInitFileSigner(unittest.TestCase):
@@ -2601,6 +2742,706 @@ class RuntimeTest(TestBase, unittest.TestCase):
         mean_dt = self.get_mean_dt(ts)
         _logger.info(f"Average iteration time with multiple PyRosettaCluster instances: {mean_dt:0.7f} seconds")
         self.tear_down_logger(_logger, _stream_handler)
+
+
+class PrioritiesTest(unittest.TestCase):
+    def test_priorities(self):
+        """Smoke test for the use case of priorities of tasks with PyRosettaCluster."""
+        pyrosetta.distributed.init(
+            options="-run:constant_seed 1 -multithreading:total_threads 1",
+            extra_options="-out:level 200",
+            set_logging_handler="logging",
+        )
+        with tempfile.TemporaryDirectory() as workdir:
+            with warnings.catch_warnings():
+                # Catch 'ResourceWarning: unclosed <socket.socket ...' from distributed/node.py:235
+                # Catch 'UserWarning: Port 8787 is already in use' from distributed/node.py:240
+                # Catch 'DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)' from bokeh/core/property/primitive.py:37
+                # Catch 'DeprecationWarning: pkg_resources is deprecated as an API.' from jupyter_server_proxy/config.py:10
+                warnings.simplefilter("ignore", category=ResourceWarning)
+                warnings.simplefilter("ignore", category=UserWarning)
+                warnings.simplefilter("ignore", category=DeprecationWarning)
+                cluster_1 = LocalCluster(
+                    n_workers=1, # One worker for all tasks to test priorities
+                    threads_per_worker=1, # One thread per worker to block recurrently running tasks
+                    dashboard_address=None,
+                    local_directory=workdir,
+                )
+
+            client_1 = Client(cluster_1)
+
+            _n_tasks: int = 10
+            _n_protocols: int = 3
+
+            def create_tasks():
+                t0 = time.time()
+                for i in range(_n_tasks):
+                    yield {
+                        "extra_options": "-ex1 -multithreading:total_threads 1",
+                        "set_logging_handler": "logging",
+                        "task": i,
+                        "t0": t0,
+                    }
+
+            def my_pyrosetta_protocol(packed_pose, **kwargs):
+                protocol_number = kwargs["PyRosettaCluster_protocol_number"]
+                task = kwargs["task"]
+                t0 = kwargs["t0"]
+                t1 = time.time()
+                dt = round(t1 - t0, 1)
+                scoretype = f"task_{task}_protocol_{protocol_number}"
+                return packed_pose.update_scores({scoretype: dt})
+
+            protocols = [my_pyrosetta_protocol] * _n_protocols
+            clients_indices = [0] * _n_protocols
+            scorefile_name = "test_priorities.json"
+            decoy_dir_name = "decoys"
+            sequence = "TASK/CHAIN"
+            # Depth-first task chains (increases priority per recursion, so task chains run to completion)
+            depth_first_priorities = [
+                list(range(0, _n_protocols * 10, 10)),
+                list(range(-_n_protocols * 2, 0, 2)),
+            ]
+            # Breadth-first task chains (first-in, first-out)
+            breadth_first_priorities = [
+                [0] * _n_protocols,
+                [25] * _n_protocols,
+            ]
+            priorities_test_cases = {}
+            depth_first_test_cases = []
+            breadth_first_test_cases = []
+            test_case = 0
+            # Register depth-first tests explicitly
+            for priorities in depth_first_priorities:
+                priorities_test_cases[test_case] = priorities
+                depth_first_test_cases.append(test_case)
+                test_case += 1
+            # Register breadth-first tests explicitly
+            for priorities in breadth_first_priorities:
+                priorities_test_cases[test_case] = priorities
+                breadth_first_test_cases.append(test_case)
+                test_case += 1
+            # Run test cases
+            for test_case, priorities in priorities_test_cases.items():
+                output_path = os.path.join(workdir, "outputs" + "_".join(map(str, priorities)))
+                instance_kwargs = dict(
+                    tasks=create_tasks,
+                    input_packed_pose=io.pose_from_sequence(sequence),
+                    seeds=None,
+                    decoy_ids=None,
+                    client=None,
+                    clients=[client_1],
+                    clients_indices=clients_indices,
+                    protocols=protocols,
+                    priorities=priorities,
+                    resources=None,
+                    scheduler=None,
+                    scratch_dir=workdir,
+                    cores=None,
+                    processes=None,
+                    memory=None,
+                    min_workers=1,
+                    max_workers=1,
+                    nstruct=1,
+                    dashboard_address=None,
+                    compressed=True,
+                    logging_level="INFO",
+                    scorefile_name=scorefile_name,
+                    project_name="PyRosettaCluster_Tests",
+                    simulation_name=uuid.uuid4().hex,
+                    environment=None,
+                    output_path=output_path,
+                    simulation_records_in_scorefile=True,
+                    decoy_dir_name=decoy_dir_name,
+                    logs_dir_name="logs",
+                    ignore_errors=True,
+                    timeout=0.5,
+                    max_delay_time=0.5,
+                    sha1=None,
+                    dry_run=False,
+                    save_all=False,
+                    system_info=None,
+                    pyrosetta_build=None,
+                    filter_results=True,
+                    norm_task_options=None,
+                    output_init_file=None,
+                    output_decoy_types=[".b64_pose"],
+                    output_scorefile_types=[".json"],
+                    security=False,
+                    max_nonce=99999,
+                )
+                produce(**instance_kwargs)
+
+                scorefile_path = os.path.join(output_path, scorefile_name)
+                # Analyze adjacent protocol transition rate
+                results = {}
+                with open(scorefile_path, "r") as f:
+                    for line in f:
+                        d = json.loads(line)
+                        results.update(d.get("scores"))
+                # Sort result
+                sorted_results = sorted(results.items(), key=lambda kv: kv[1])
+                # Extract task numbers
+                task_positions = collections.defaultdict(list)
+                for i, (name, _) in enumerate(sorted_results):
+                    task_num = int(name.split("_")[1])
+                    task_positions[task_num].append(i)
+                # Compute variance per task
+                task_variances = [numpy.var(pos) for pos in task_positions.values()]
+                # Compute mean variance
+                spread_metric = numpy.mean(task_variances)
+                # Compute theoretical maximum variance
+                max_var = (len(sorted_results) - 1) ** 2 / 4
+                # Compute normalized variance metric
+                norm_variance = spread_metric / max_var
+                # Empirically, depth-first runs yield norm variance ~0.01-0.08 and breadth-first ~0.32-0.34.
+                # Therefore, the midpoint (~0.1894) robustly separates the two behaviors
+                norm_variance_threshold = 0.1894 # Empirically determined
+                _msg = ", ".join(
+                    [
+                        f"num_protocols={_n_protocols}",
+                        f"num_tasks={_n_tasks}",
+                        f"priorities={priorities}",
+                        f"task_positions={dict(task_positions)}",
+                        f"spread_metric={spread_metric}",
+                        f"max_var={max_var}",
+                        f"norm_variance={norm_variance}",
+                        f"norm_variance_threshold={norm_variance_threshold}",
+                    ]
+                )
+                if test_case in depth_first_test_cases:
+                    self.assertLess(norm_variance, norm_variance_threshold, msg=_msg)
+                elif test_case in breadth_first_test_cases:
+                    self.assertGreater(norm_variance, norm_variance_threshold, msg=_msg)
+                else:
+                    raise NotImplementedError(test_case)
+                print(f"Successfully tested `priorities` keyword argument: {_msg}")
+
+            client_1.close()
+            cluster_1.close()
+
+
+class IntentionalError(RuntimeError):
+    def __init__(self, *args):
+        super().__init__(*args)
+
+
+class RetriesTest(unittest.TestCase):
+    """Smoke tests for the use case of task retries with PyRosettaCluster."""
+    _n_tasks: int = 3
+    _n_protocols: int = 2
+    _n_retries_per_protocol: int = 2  # 3 attempts total
+    _count_marker: str = "."
+    _counter_filename_template: str = "protocol_number-{protocol_number}__task-{task}__retries.txt"
+    _sep = "*" * 60
+
+    @classmethod
+    def setUpClass(cls):
+        pyrosetta.distributed.init(
+            options="-run:constant_seed 1 -multithreading:total_threads 1",
+            extra_options="-out:level 200",
+            set_logging_handler="logging",
+        )
+        cls.workdir = tempfile.TemporaryDirectory()
+        with warnings.catch_warnings():
+            # Catch 'ResourceWarning: unclosed <socket.socket ...' from distributed/node.py:235
+            # Catch 'UserWarning: Port 8787 is already in use' from distributed/node.py:240
+            # Catch 'DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)' from bokeh/core/property/primitive.py:37
+            # Catch 'DeprecationWarning: pkg_resources is deprecated as an API.' from jupyter_server_proxy/config.py:10
+            warnings.simplefilter("ignore", category=ResourceWarning)
+            warnings.simplefilter("ignore", category=UserWarning)
+            warnings.simplefilter("ignore", category=DeprecationWarning)
+            cls.cluster_1 = LocalCluster(
+                n_workers=1, # Must be 1 for `RetriesTest` unit tests, otherwise tasks run concurrently and test logic will fail
+                threads_per_worker=1, # Must be 1 for `RetriesTest` unit tests, otherwise tasks run concurrently and test logic will fail
+                dashboard_address=None,
+                local_directory=cls.workdir.name,
+            )
+        cls.client_1 = Client(cls.cluster_1)
+        cls.default_instance_kwargs = dict(
+            tasks=RetriesTest.create_tasks,
+            input_packed_pose=io.pose_from_sequence("TEST/TASK/RETRIES"),
+            seeds=None,
+            decoy_ids=None,
+            client=None,
+            clients=[cls.client_1],
+            scheduler=None,
+            scratch_dir=cls.workdir.name,
+            cores=None,
+            processes=None,
+            memory=None,
+            min_workers=1,
+            max_workers=1,
+            nstruct=1,
+            dashboard_address=None,
+            compressed=True,
+            logging_level="WARNING",
+            scorefile_name="scores.json",
+            project_name="PyRosettaCluster_Tests",
+            simulation_name=uuid.uuid4().hex,
+            environment=None,
+            simulation_records_in_scorefile=True,
+            decoy_dir_name="decoys",
+            logs_dir_name="logs",
+            ignore_errors=False, # Never ignore errors for `RetriesTest` test case
+            timeout=0.5,
+            max_delay_time=0.5,
+            sha1=None,
+            dry_run=False,
+            save_all=False,
+            system_info=None,
+            pyrosetta_build=None,
+            filter_results=True, # Protocols return non-empty PackedPose when succeeding
+            norm_task_options=None,
+            output_init_file=None,
+            output_decoy_types=[".pdb"],
+            output_scorefile_types=[".json"],
+            security=False,
+            max_nonce=99999,
+        )
+        print(f"{RetriesTest._sep} Begin testing PyRosettaCluster().distribute(retries=...) {RetriesTest._sep}")
+
+    @classmethod
+    def tearDownClass(cls):
+        # Note: During dask client/cluster shutdown, dask worker processes may still have in-flight tasks
+        # or scheduled retries, which can lead to emitted warnings like:
+        #   - "distributed.worker.state_machine - WARNING - Async instruction for <Task cancelled ...> ended with CancelledError"
+        #   - "UserWarning: semaphore_tracker: There appear to be ... leaked semaphores to clean up at shutdown"
+        # These warnings are expected from the `RetriesTest` test case, and do not indicate unit test failures.
+        cls.client_1.close()
+        cls.cluster_1.close()
+        time.sleep(3) # Allow logging messages from worker processes to flush
+        cls.workdir.cleanup()
+        print(f"{RetriesTest._sep} End testing PyRosettaCluster().distribute(retries=...) {RetriesTest._sep}")
+
+    @staticmethod
+    def create_tasks():
+        for i in range(RetriesTest._n_tasks):
+            yield {
+                "extra_options": "-ex1 -multithreading:total_threads 1",
+                "set_logging_handler": "logging",
+                "task": i,
+                "max_retries": RetriesTest._n_retries_per_protocol,
+                "count_marker": RetriesTest._count_marker,
+                "counter_filename_template": RetriesTest._counter_filename_template,
+            }
+
+    @staticmethod
+    def attempt_counter_protocol(**kwargs):
+        output_path = kwargs["PyRosettaCluster_output_path"]
+        protocol_number = kwargs["PyRosettaCluster_protocol_number"]
+        task = kwargs["task"]
+        max_retries = kwargs["max_retries"]
+        max_attempts = max_retries + 1 # Plus one, since retries only occur after the initial attempt
+        count_marker = kwargs["count_marker"]
+        counter_filename_template = kwargs["counter_filename_template"]
+        counter_file = os.path.join(
+            output_path,
+            counter_filename_template.format(protocol_number=protocol_number, task=task),
+        )
+        # Log new attempt
+        with open(counter_file, "a") as f:
+            total_attempts = f.write(count_marker)
+        # Get total attempts, including this attempt
+        with open(counter_file, "r") as f:
+            total_attempts = f.read().count(count_marker)
+
+        return task, total_attempts, max_attempts
+
+    @staticmethod
+    def my_protocol(packed_pose, **kwargs):
+        return packed_pose, kwargs
+
+    @staticmethod
+    def protocol_with_intentional_error(packed_pose, **kwargs):
+        task, total_attempts, max_attempts = RetriesTest.attempt_counter_protocol(**kwargs)
+        # Always raise error
+        raise IntentionalError(f"Task {task} intentionally raised error on attempt {total_attempts}/{max_attempts}")
+
+    @staticmethod
+    def protocol_succeeds_on_last_retry(packed_pose, **kwargs):
+        task, total_attempts, max_attempts = RetriesTest.attempt_counter_protocol(**kwargs)
+        if total_attempts == max_attempts: # Succeed on last retry
+            print(f"Protocol `protocol_succeeds_on_last_retry` succeeding on last attempt ({total_attempts}/{max_attempts})!")
+            return packed_pose
+        else: # Fail if not on last retry
+            raise IntentionalError(f"Task {task} intentionally raised error on attempt {total_attempts}/{max_attempts}")
+
+    def test_retries_persistent_errors(self):
+        """Test retries of protocols with persistent errors."""
+        protocols = [RetriesTest.protocol_with_intentional_error] * RetriesTest._n_protocols
+        output_path = os.path.join(self.workdir.name, "outputs_persistent_errors")
+        prc = PyRosettaCluster(
+            **self.default_instance_kwargs,
+            **{"output_path": output_path},
+        )
+        with self.assertRaises(WorkerError):
+            prc.distribute(
+                protocols=protocols,
+                clients_indices=[0] * RetriesTest._n_protocols,
+                resources=None,
+                priorities=None,
+                retries=RetriesTest._n_retries_per_protocol,
+            )
+        # Only one counter file should have the maximum attempts, but because submitted tasks
+        # run asynchronously in a potentially shuffled order, we must find which one
+        counter_files = glob.glob(
+            os.path.join(output_path, RetriesTest._counter_filename_template.format(protocol_number="*", task="*"))
+        )
+        task_total_attempts_dict = {}
+        for counter_file in counter_files:
+            basename_split = os.path.basename(counter_file).split("__")
+            protocol_number = int(list(filter(lambda x: x.startswith("protocol_number"), basename_split))[0].split("-")[-1])
+            self.assertEqual(protocol_number, 0, msg="Only protocol number 0 should have been run!")
+            task = int(list(filter(lambda x: x.startswith("task"), basename_split))[0].split("-")[-1])
+            self.assertIn(task, tuple(range(RetriesTest._n_tasks)), msg="Task is out of task range!")
+            with open(counter_file, "r") as f:
+                total_attempts = f.read().count(RetriesTest._count_marker)
+            task_total_attempts_dict[task] = total_attempts
+        task_with_max_attempts, max_attempts = sorted(task_total_attempts_dict.items(), key=lambda kv: kv[1], reverse=True)[0]
+        self.assertEqual(max_attempts, RetriesTest._n_retries_per_protocol + 1, msg="Maximum number of task attempts failed.")
+        for task, attempts in task_total_attempts_dict.items():
+            if task != task_with_max_attempts:
+                self.assertLess(
+                    attempts,
+                    max_attempts,
+                    msg=(
+                        f"Task {task} with {attempts} attempts must have less attempts "
+                        f"than task {task_with_max_attempts} with maximum attempts {max_attempts}."
+                    ),
+                )
+        print("Unit test with protocols raising intentional errors passed successfully!")
+
+    def test_retries_succeed_on_last_retry(self):
+        """Test retries of protocols that succeed on last retry."""
+        protocols = [RetriesTest.protocol_succeeds_on_last_retry] * RetriesTest._n_protocols
+        output_path = os.path.join(self.workdir.name, "outputs_protocols_succeed_on_last_retry")
+        PyRosettaCluster(
+            **self.default_instance_kwargs,
+            **{"output_path": output_path},
+        ).distribute(
+            protocols=protocols,
+            clients_indices=[0] * RetriesTest._n_protocols,
+            resources=None,
+            priorities=None,
+            retries=[RetriesTest._n_retries_per_protocol] * RetriesTest._n_protocols,
+        )
+        for protocol_number in range(RetriesTest._n_protocols):
+            for task in range(RetriesTest._n_tasks):
+                counter_file = os.path.join(
+                    output_path,
+                    RetriesTest._counter_filename_template.format(protocol_number=protocol_number, task=task),
+                )
+                self.assertTrue(os.path.isfile(counter_file), msg=f"Retries counter file does not exist: {counter_file}")
+                with open(counter_file, "r") as f:
+                    total_attempts = f.read().count(RetriesTest._count_marker)
+                self.assertEqual(total_attempts, RetriesTest._n_retries_per_protocol + 1, msg="Number of task attempts failed.")
+        print("Unit test with protocols succeeding only on last retry passed successfully!")
+
+    def test_no_retries(self):
+        """Test no retries of a failed protocol."""
+        protocols = [RetriesTest.protocol_with_intentional_error] * RetriesTest._n_protocols
+        output_path = os.path.join(self.workdir.name, "outputs_protocols_no_retries")
+        prc = PyRosettaCluster(
+            **self.default_instance_kwargs,
+            **{"output_path": output_path},
+        )
+        with self.assertRaises(WorkerError):
+            prc.distribute(
+                protocols=protocols,
+                clients_indices=[0] * RetriesTest._n_protocols,
+                resources=None,
+                priorities=None,
+                retries=None, # Automatically uses the `dask.distributed` default of 0
+            )
+        # Because submitted tasks run asynchronously in a potentially shuffled order,
+        # only one task should have been run
+        tasks_run_counter = 0
+        for protocol_number in range(RetriesTest._n_protocols):
+            for task in range(RetriesTest._n_tasks):
+                counter_file = os.path.join(
+                    output_path,
+                    RetriesTest._counter_filename_template.format(protocol_number=protocol_number, task=task),
+                )
+                if os.path.isfile(counter_file):
+                    with open(counter_file, "r") as f:
+                        total_attempts = f.read().count(RetriesTest._count_marker)
+                    self.assertEqual(total_attempts, 1, msg="Number of task attempts failed.")
+                    tasks_run_counter += 1
+        self.assertEqual(tasks_run_counter, 1, msg=f"Unexpected number of tasks run: {tasks_run_counter}")
+        print("Unit test with no retries passed successfully!")
+
+    def test_retries_api(self):
+        """Test retries API."""
+        protocols = [RetriesTest.my_protocol] * RetriesTest._n_protocols
+        clients_indices = [0] * RetriesTest._n_protocols
+        output_path = os.path.join(self.workdir.name, "outputs_protocols_retries_api")
+        produce(
+            **self.default_instance_kwargs,
+            **dict(
+                output_path=f"{output_path}_1",
+                protocols=protocols,
+                clients_indices=clients_indices,
+                resources=None,
+                priorities=None,
+                retries=tuple(range(0, RetriesTest._n_protocols * 10, 10)), # Test different values in tuple
+            )
+        )
+        run(
+            **self.default_instance_kwargs,
+            **dict(
+                output_path=f"{output_path}_2",
+                protocols=protocols,
+                clients_indices=clients_indices,
+                resources=None,
+                priorities=None,
+                retries=list(reversed(range(RetriesTest._n_protocols))), # Test different values in list
+            )
+        )
+        prc_iterator = iterate(
+            **self.default_instance_kwargs,
+            **dict(
+                output_path=f"{output_path}_3",
+                protocols=protocols,
+                clients_indices=clients_indices,
+                resources=None,
+                priorities=None,
+                retries=set(range(RetriesTest._n_protocols)), # Test validation error with set
+            )
+        )
+        with self.assertRaises(ValueError) as ex:
+            _ = list(prc_iterator)
+        self.assertIn(
+            "The `retries` keyword argument parameter must be of type `int`, `list`, or `tuple`.",
+            str(ex.exception),
+            msg="Incorrect error message."
+        )
+        prc_generator = PyRosettaCluster(
+            **self.default_instance_kwargs,
+            output_path=f"{output_path}_4",
+        ).generate(
+            protocols=protocols,
+            clients_indices=clients_indices,
+            resources=None,
+            priorities=None,
+            retries=list(range(RetriesTest._n_protocols + 1)), # Test validation error with different size
+        )
+        with self.assertRaises(ValueError) as ex:
+            _ = list(prc_generator)
+        self.assertIn(
+            "The `retries` keyword argument parameter must have the same length as the number of user-defined PyRosetta protocols!",
+            str(ex.exception),
+            msg="Incorrect error message."
+        )
+        prc = PyRosettaCluster(
+            **self.default_instance_kwargs,
+            output_path=f"{output_path}_5",
+        )
+        with self.assertRaises(ValueError) as ex:
+            prc.distribute(
+                protocols=protocols,
+                clients_indices=clients_indices,
+                resources=None,
+                priorities=None,
+                retries=-1, # Test validation error with negative integer
+            )
+        self.assertIn(
+            "If the `retries` keyword argument parameter is of type `int`, it must be greater than or equal to 0.",
+            str(ex.exception),
+            msg="Incorrect error message."
+        )
+        with self.assertRaises(ValueError) as ex:
+            produce(
+                **self.default_instance_kwargs,
+                **dict(
+                    output_path=f"{output_path}_6",
+                    protocols=protocols,
+                    clients_indices=clients_indices,
+                    resources=None,
+                    priorities=None,
+                    retries=1.0, # Test validation error with float
+                )
+            )
+        self.assertIn(
+            "The `retries` keyword argument parameter must be of type `int`, `list`, or `tuple`.",
+            str(ex.exception),
+            msg="Incorrect error message."
+        )
+        print("Unit test for retries API passed successfully!")
+
+
+@unittest.skipIf(
+    sys.version_info[:2] < (3, 8),
+    "Unit test implements positional-only argument separators in function signatures, which is supported by Python-3.8+ only."
+)
+class TaskKeysTest(unittest.TestCase):
+    """Smoke tests for user-defined task dictionary keys and user-defined PyRosetta protocol input signatures."""
+    @classmethod
+    def setUpClass(cls):
+        pyrosetta.distributed.init(
+            options="-run:constant_seed 1 -multithreading:total_threads 1",
+            extra_options="-out:level 200",
+            set_logging_handler="logging",
+        )
+        cls.input_packed_pose = io.pose_from_sequence("ARG/SEP")
+        cls.workdir = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.workdir.cleanup()
+
+    @staticmethod
+    def positional_arbitrary_parameter_protocol(baz, /, **kwargs):
+        """Test Case #1: A user-defined PyRosetta protocol with a positional-only parameter named 'baz'."""
+        return baz, kwargs
+
+    @staticmethod
+    def positional_or_keyword_arbitrary_parameter_protocol(baz, **kwargs):
+        """Test Case #2: A user-defined PyRosetta protocol with a positional-or-keyword parameter named 'baz'."""
+        return baz, kwargs
+
+    @staticmethod
+    def positional_custom_parameter_protocol(foo, /, **kwargs):
+        """Test Case #3: A user-defined PyRosetta protocol with a positional-only parameter named 'foo'."""
+        return foo, kwargs
+
+    @staticmethod
+    def positional_or_keyword_custom_parameter_protocol(foo, **kwargs):
+        """Test Case #4: A user-defined PyRosetta protocol with a positional-or-keyword parameter named 'foo'."""
+        return foo, kwargs
+
+    @staticmethod
+    def positional_parameter_protocol(packed_pose, /, **kwargs):
+        """Test Case #5: A user-defined PyRosetta protocol with a positional-only parameter named 'packed_pose'."""
+        return packed_pose, kwargs
+
+    @staticmethod
+    def positional_or_keyword_parameter_protocol(packed_pose, **kwargs):
+        """Test Case #6: A user-defined PyRosetta protocol with a positional-or-keyword parameter named 'packed_pose'."""
+        return packed_pose, kwargs
+
+    def test_task_keys(self):
+        """Test compatibility between user-defined task dictionary keys and user-defined PyRosetta protocol input signatures."""
+        task_keys = set()
+        for func in (run_protocol, user_protocol):
+            sig = inspect.signature(func)
+            for name, param in sig.parameters.items():
+                if str(param.kind) != "VAR_KEYWORD": # Add all except variadic keyword parameters
+                    task_keys.add(name)
+        task_keys.update({"foo", "bar"}) # Add custom task keys
+        instance_kwargs = dict(
+            tasks=dict(map(reversed, enumerate(task_keys))),
+            input_packed_pose=self.input_packed_pose,
+            scheduler=None,
+            cores=None,
+            processes=None,
+            memory=None,
+            min_workers=1,
+            max_workers=1,
+            nstruct=1,
+            project_name="PyRosettaCluster_Tests",
+            simulation_name=uuid.uuid4().hex,
+            scratch_dir=os.path.join(self.workdir.name, "scratch"),
+            sha1=None,
+        )
+        output_path = os.path.join(self.workdir.name, "test_task_keys")
+        _sep = "*" * 60
+
+        # --- Test case #1 ---
+        # Test a user-defined PyRosetta protocol defining a positional-only parameter named 'baz':
+        # The user-defined task dictionary does not contain the 'baz' key, and the user-defined PyRosetta
+        # protocol defines a positional-only parameter named 'baz', so upon calling the user-defined PyRosetta protocol,
+        # PyRosettaCluster passes the `packed_pose` variable as a positional argument to the 'baz' parameter, and the
+        # 'packed_pose' keyword argument from the unpacked user-defined task dictionary is collected by the variadic
+        # keyword parameter, which avoids a `TypeError` since it's valid Python syntax.
+        protocol = TaskKeysTest.positional_arbitrary_parameter_protocol
+        parameter_name = "baz"
+        self.assertNotIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_1")
+
+        # --- Test case #2 ---
+        # Test a user-defined PyRosetta protocol defining a positional-or-keyword parameter named 'baz':
+        # The user-defined task dictionary does not contain the 'baz' key, and the user-defined PyRosetta
+        # protocol defines a positional-or-keyword parameter named 'baz', so upon calling the user-defined PyRosetta protocol,
+        # PyRosettaCluster passes the `packed_pose` variable as a positional argument to the 'baz' parameter, and the
+        # 'packed_pose' keyword argument from the unpacked user-defined task dictionary is collected by the variadic
+        # keyword parameter, which avoids a `TypeError` since it's valid Python syntax.
+        protocol = TaskKeysTest.positional_or_keyword_arbitrary_parameter_protocol
+        parameter_name = "baz"
+        self.assertNotIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_2")
+
+        # --- Test case #3 ---
+        # Test a user-defined PyRosetta protocol defining a positional-only parameter named 'foo':
+        # Although the user-defined task dictionary contains the 'foo' key, because the user-defined PyRosetta
+        # protocol defines a positional-only parameter named 'foo', upon calling the user-defined PyRosetta protocol,
+        # PyRosettaCluster passes the `packed_pose` variable as a positional argument to the 'foo' parameter, and the
+        # 'foo' keyword argument from the unpacked user-defined task dictionary is collected by the variadic
+        # keyword parameter, which avoids a `TypeError` since it's valid Python syntax.
+        protocol = TaskKeysTest.positional_custom_parameter_protocol
+        parameter_name = "foo"
+        self.assertIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_3")
+
+        # --- Test case #4 ---
+        # Test a user-defined PyRosetta protocol defining a positional-or-keyword parameter named 'foo':
+        protocol = TaskKeysTest.positional_or_keyword_custom_parameter_protocol
+        parameter_name = "foo"
+        self.assertIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        print(f"{_sep} Begin testing expected `TypeError` in billiard subprocess {_sep}")
+        with self.assertRaises(WorkerError):
+            # Catch exception in billiard subprocess raised due to the user-defined task dictionary containing the
+            # 'foo' key and the user-defined PyRosetta protocol defining the positional-or-keyword parameter 'foo'.
+            # When calling the user-defined PyRosetta protocol, PyRosettaCluster passes the `packed_pose` variable as
+            # a positional argument to the 'foo' parameter, and the user-defined task dictionary is unpacked with the
+            # 'foo' keyword argument name, causing the exception:
+            #     TypeError: TaskKeysTest.positional_or_keyword_custom_parameter_protocol() got multiple values for argument 'foo'
+            # However, this is a user error. To fix it, the user must either: (i) remove the 'foo' key from the user-defined
+            # task dictionary; (ii) add a positional-only argument separator to the user-defined PyRosetta protocol input
+            # signature to make the 'foo' parameter positional-only (as in Test Case #3); or (iii) change the positional-or-keyword
+            # parameter name in the user-defined PyRosetta protocol input signature so that it doesn't clash with the 'foo' key
+            # from the user-defined task dictionary (as in Test Case #2).
+            run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_4")
+        print(f"{_sep} End testing expected `TypeError` in billiard subprocess {_sep}")
+
+        # --- Test case #5 ---
+        # Test a user-defined PyRosetta protocol defining a positional-only parameter named 'packed_pose':
+        # Although the user-defined task dictionary contains the 'packed_pose' key, because the user-defined PyRosetta
+        # protocol defines a positional-only parameter named 'packed_pose', upon calling the user-defined PyRosetta protocol,
+        # PyRosettaCluster passes the `packed_pose` variable as a positional argument to the 'packed_pose' parameter, and the
+        # 'packed_pose' keyword argument from the unpacked user-defined task dictionary is collected by the variadic
+        # keyword parameter, which avoids a `TypeError` since it's valid Python syntax.
+        protocol = TaskKeysTest.positional_parameter_protocol
+        parameter_name = "packed_pose"
+        self.assertIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_5")
+
+        # --- Test case #6 ---
+        # Test a user-defined PyRosetta protocol defining a positional-or-keyword parameter named 'packed_pose':
+        protocol = TaskKeysTest.positional_or_keyword_parameter_protocol
+        parameter_name = "packed_pose"
+        self.assertIn(parameter_name, instance_kwargs.get("tasks"))
+        self.assertIn(parameter_name, inspect.signature(protocol).parameters)
+        print(f"{_sep} Begin testing expected `TypeError` in billiard subprocess {_sep}")
+        with self.assertRaises(WorkerError):
+            # Catch exception in billiard subprocess raised due to the user-defined task dictionary containing the
+            # 'packed_pose' key and the user-defined PyRosetta protocol defining the positional-or-keyword parameter 'packed_pose'.
+            # When calling the user-defined PyRosetta protocol, PyRosettaCluster passes the `packed_pose` variable as a positional
+            # argument to the 'packed_pose' parameter, and the user-defined task dictionary is unpacked with the 'packed_pose'
+            # keyword argument name, causing the exception:
+            #     TypeError: TaskKeysTest.positional_or_keyword_parameter_protocol() got multiple values for argument 'packed_pose'
+            # However, this is a user error. To fix it, the user must either: (i) remove the 'packed_pose' key from the
+            # user-defined task dictionary; (ii) add a positional-only argument separator to the user-defined PyRosetta protocol
+            # input signature to make the 'packed_pose' parameter positional-only (as in Test Case #5); or (iii) change the
+            # positional-or-keyword parameter name in the user-defined PyRosetta protocol input signature so that it doesn't clash
+            # with the 'packed_pose' key from the user-defined task dictionary (as in Test Case #2).
+            run(**instance_kwargs, protocols=protocol, output_path=f"{output_path}_6")
+        print(f"{_sep} End testing expected `TypeError` in billiard subprocess {_sep}")
 
 
 # if __name__ == "__main__":

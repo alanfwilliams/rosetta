@@ -15,7 +15,6 @@ from typing import (
     AbstractSet,
     Any,
     Callable,
-    Dict,
     Iterable,
     List,
     NoReturn,
@@ -82,6 +81,62 @@ def _validate_resources(resources: Any, _protocols: List[Callable[..., Any]]) ->
                 "The `resources` keyword argument parameter must have the same length as the number of user-defined PyRosetta protocols!\n"
                 + f"Received `PyRosettaCluster().distribute(protocols=...)`: {_protocols}\n"
                 + f"Received `PyRosettaCluster().distribute(resources=...)`: {resources}\n"
+            )
+
+
+def _validate_priorities(priorities: Any, _protocols: List[Callable[..., Any]]) -> Optional[NoReturn]:
+    """Validate the `priorities` keyword argument parameter."""
+    if priorities is not None:
+        if not isinstance(priorities, (tuple, list)):
+            raise ValueError(
+                "The `priorities` keyword argument parameter must be of type `list` or `tuple`.\n"
+                + f"Received: {type(priorities)}\n"
+            )
+        for obj in priorities:
+            if not isinstance(obj, int):
+                raise ValueError(
+                    "Each item of the `priorities` keyword argument parameter must be of type `int`.\n"
+                    + f"Received: {type(obj)}\n"
+                )
+        if len(priorities) != len(_protocols):
+            raise ValueError(
+                "The `priorities` keyword argument parameter must have the same length as the number of user-defined PyRosetta protocols!\n"
+                + f"Received `PyRosettaCluster().distribute(protocols=...)`: {_protocols}\n"
+                + f"Received `PyRosettaCluster().distribute(priorities=...)`: {priorities}\n"
+            )
+
+
+def _validate_retries(retries: Any, _protocols: List[Callable[..., Any]]) -> Optional[NoReturn]:
+    """Validate the `retries` keyword argument parameter."""
+    if retries is not None:
+        if isinstance(retries, int):
+            if retries < 0:
+                raise ValueError(
+                    "If the `retries` keyword argument parameter is of type `int`, it must be greater than or equal to 0.\n"
+                    + f"Received: {retries}\n"
+                )
+        elif isinstance(retries, (tuple, list)):
+            for obj in retries:
+                if not isinstance(obj, int):
+                    raise ValueError(
+                        "Each item of the `retries` keyword argument parameter must be of type `int`.\n"
+                        + f"Received: {type(obj)}\n"
+                    )
+                if obj < 0:
+                    raise ValueError(
+                        "Each item of the `retries` keyword argument parameter must be greater than or equal to 0.\n"
+                        + f"Received: {obj}\n"
+                    )
+            if len(retries) != len(_protocols):
+                raise ValueError(
+                    "The `retries` keyword argument parameter must have the same length as the number of user-defined PyRosetta protocols!\n"
+                    + f"Received `PyRosettaCluster().distribute(protocols=...)`: {_protocols}\n"
+                    + f"Received `PyRosettaCluster().distribute(retries=...)`: {retries}\n"
+                )
+        else:
+            raise ValueError(
+                "The `retries` keyword argument parameter must be of type `int`, `list`, or `tuple`.\n"
+                + f"Received: {type(retries)}\n"
             )
 
 

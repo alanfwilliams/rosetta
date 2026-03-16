@@ -23,13 +23,11 @@ from pyrosetta.distributed.cluster.toolkit import (
     get_yml,
     iterate,
     produce,
-    recreate_environment,
     reproduce,
     requires_packed_pose,
     reserve_scores,
     run,
     update_scores,
-    _print_conda_warnings,
 )
 from typing import List
 
@@ -46,16 +44,14 @@ __all__: List[str] = [
     "get_yml",
     "iterate",
     "produce",
-    "recreate_environment",
     "reproduce",
     "requires_packed_pose",
     "reserve_scores",
     "run",
     "update_scores",
 ]
-__version__: str = "3.1.0"
+__version__: str = "3.8.1"
 
-_print_conda_warnings()
 
 with warnings.catch_warnings() and suppress(NameError):
     warnings.simplefilter("ignore", category=UserWarning)

@@ -23,6 +23,7 @@ except ImportError:
     )
     raise
 
+import inspect
 import logging
 import tempfile
 import time
@@ -80,12 +81,14 @@ def user_protocol(
     packed_pose: PackedPose,
     protocol: Callable[..., Any],
     ignore_errors: bool,
-    **kwargs: Dict[Any, Any],
+    kwargs: Dict[Any, Any],
 ) -> Any:
     """Run the user-provided PyRosetta protocol."""
     with tempfile.TemporaryDirectory() as tmp_path:
         kwargs["PyRosettaCluster_tmp_path"] = tmp_path
         result = protocol(packed_pose, **kwargs)
+        if inspect.isgenerator(result):
+            result = list(result)
 
     return result
 
@@ -101,10 +104,10 @@ def run_protocol(
     protocols_key: str,
     decoy_ids: List[int],
     serializer: S,
-    **kwargs: Dict[Any, Any],
+    kwargs: Dict[Any, Any],
 ) -> List[Tuple[bytes, bytes]]:
     """Parse the user-provided PyRosetta protocol results."""
-    result = user_protocol(packed_pose, protocol, ignore_errors, **kwargs)
+    result = user_protocol(packed_pose, protocol, ignore_errors, kwargs)
     results = _parse_protocol_results(result, kwargs, protocol_name, protocols_key, decoy_ids, serializer)
 
     return results
@@ -176,7 +179,7 @@ def target(
         protocols_key,
         decoy_ids,
         serializer,
-        **kwargs,
+        kwargs,
     )
     _validate_residue_type_sets(
         _get_residue_type_set(), client_residue_type_set,

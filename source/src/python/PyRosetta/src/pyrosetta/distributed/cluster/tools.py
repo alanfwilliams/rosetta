@@ -26,23 +26,20 @@ import inspect
 import json
 import logging
 import os
-import shutil
-import subprocess
 import tempfile
 import warnings
 
-from datetime import datetime
 from functools import wraps
 from pyrosetta.distributed.cluster.converters import _parse_protocols
 from pyrosetta.distributed.cluster.converter_tasks import (
     is_dict,
     is_empty,
     get_protocols_list_of_str,
-    get_yml,
     parse_client,
     parse_decoy_name,
     parse_init_file,
     parse_input_file_to_instance_kwargs,
+    parse_input_file_to_instance_metadata_kwargs,
     parse_instance_kwargs,
     parse_scorefile,
     reserve_scores_in_results,
@@ -73,35 +70,6 @@ from typing import (
 
 
 P = TypeVar("P", bound=Callable[..., Any])
-
-
-def _print_conda_warnings() -> None:
-    """
-    Print warning message if Anaconda or Miniconda are not installed and we are
-    not in an active conda environment on the client.
-    """
-    try:
-        _worker = distributed.get_worker()
-    except ValueError:
-        _worker = None
-    if not _worker:
-        if shutil.which("conda"):  # Anaconda or Miniconda is installed
-            if get_yml() == "":
-                print(
-                    "Warning: To use the `pyrosetta.distributed.cluster` namespace, please "
-                    + "create and activate a conda environment (other than 'base') to ensure "
-                    + "reproducibility of PyRosetta simulations. For instructions, visit:\n"
-                    + "https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html\n"
-                    + "https://conda.io/activation\n"
-                )  # Warn that we are not in an active conda environment
-        else:  # Anaconda or Miniconda is not installed
-            print(
-                "Warning: Use of `pyrosetta.distributed.cluster` namespace requires Anaconda "
-                + "(or Miniconda) to be properly installed for reproducibility of PyRosetta "
-                + "simulations. Please install Anaconda (or Miniconda) onto your system "
-                + "to enable running `which conda`. For installation instructions, visit:\n"
-                + "https://docs.anaconda.com/anaconda/install\n"
-            )  # Warn that `conda` is not in $PATH
 
 
 def get_protocols(
@@ -212,7 +180,8 @@ def get_instance_kwargs(
     scorefile: Optional[str] = None,
     decoy_name: Optional[str] = None,
     skip_corrections: Optional[bool] = None,
-) -> Union[Dict[str, Any], NoReturn]:
+    with_metadata_kwargs: Optional[bool] = None,
+) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]], NoReturn]:
     """
     Given an input file that was written by PyRosettaCluster, or a scorefile
     and a decoy name that was written by PyRosettaCluster, return the PyRosettaCluster
@@ -221,7 +190,7 @@ def get_instance_kwargs(
     Args:
         input_file: A `str` object specifying the path to the '.pdb', '.pdb.bz2', '.pkl_pose',
             '.pkl_pose.bz2', '.b64_pose', '.b64_pose.bz2', '.init', or '.init.bz2' file, or a
-            `Pose`or `PackedPose` object, from which to extract PyRosettaCluster instance kwargs.
+            `Pose` or `PackedPose` object, from which to extract PyRosettaCluster instance kwargs.
             If 'input_file' is provided, then ignore the 'scorefile' and 'decoy_name' keyword
             argument parameters.
             Default: None
@@ -240,9 +209,15 @@ def get_instance_kwargs(
             corrections specified in the PyRosettaCluster task initialization options
             (extracted from the 'input_file' or 'scorefile' keyword argument parameter).
             Default: None
+        with_metadata_kwargs: A `bool` object specifying whether or not to return a `tuple`
+            object with the instance kwargs as the first element and the metadata kwargs as
+            the second element.
+            Default: None
 
     Returns:
-        A `dict` object of PyRosettaCluster instance kwargs.
+        A `dict` object of PyRosettaCluster instance kwargs, or a `tuple` object of `dict`
+        objects with the PyRosettaCluster instance kwargs as the first element and the
+        PyRosettaCluster metadata kwargs as the second element when `with_metadata_kwargs=True`.
     """
     _simulation_records_in_scorefile_msg = (
         "The 'scorefile' argument parameter does not contain the full simulation records. "
@@ -260,7 +235,10 @@ def get_instance_kwargs(
                 UserWarning,
                 stacklevel=2,
             )
-        instance_kwargs = parse_input_file_to_instance_kwargs(input_file)
+        if with_metadata_kwargs:
+            instance_kwargs, metadata_kwargs = parse_input_file_to_instance_metadata_kwargs(input_file)
+        else:
+            instance_kwargs = parse_input_file_to_instance_kwargs(input_file)
     elif scorefile and decoy_name:
         scorefile = parse_scorefile(scorefile)
         decoy_name = parse_decoy_name(decoy_name)
@@ -279,6 +257,8 @@ def get_instance_kwargs(
                         if "decoy_name" in scorefile_entry["metadata"]:
                             if scorefile_entry["metadata"]["decoy_name"] == decoy_name:
                                 instance_kwargs = scorefile_entry["instance"]
+                                if with_metadata_kwargs:
+                                    metadata_kwargs = scorefile_entry["metadata"]
                                 break
                     else:
                         raise NotImplementedError(_simulation_records_in_scorefile_msg)
@@ -295,6 +275,8 @@ def get_instance_kwargs(
                     if "decoy_name" in metadata:
                         if metadata["decoy_name"] == decoy_name:
                             instance_kwargs = dict(instance)
+                            if with_metadata_kwargs:
+                                metadata_kwargs = dict(metadata)
                             break
             else:
                 raise NotImplementedError(_simulation_records_in_scorefile_msg)
@@ -309,6 +291,10 @@ def get_instance_kwargs(
     assert isinstance(
         instance_kwargs, dict
     ), "Returned instance keyword arguments are not of type `dict`."
+    if with_metadata_kwargs:
+        assert isinstance(
+            metadata_kwargs, dict
+        ), "Returned metadata keyword arguments are not of type `dict`."
 
     if skip_corrections:
         assert isinstance(
@@ -335,137 +321,40 @@ def get_instance_kwargs(
                         + f"Received: {type(instance_kwargs['tasks'][option])}"
                     )
 
-    return instance_kwargs
-
-
-def recreate_environment(
-    environment_name: Optional[str] = None,
-    input_file: Optional[Union[str, Pose, PackedPose]] = None,
-    scorefile: Optional[str] = None,
-    decoy_name: Optional[str] = None,
-    timeout: Optional[int] = None,
-) -> Optional[NoReturn]:
-    """
-    Given an input file that was written by PyRosettaCluster, or a scorefile
-    and a decoy name that was written by PyRosettaCluster, recreate the conda
-    environment that was used to generate the decoy with a new environment name.
-
-    Args:
-        environment_name: A `str` object specifying the new name of the conda environment
-            to recreate.
-            Default: 'PyRosettaCluster_' + datetime.now().strftime("%Y.%m.%d.%H.%M.%S.%f")
-        input_file: A `str` object specifying the path to the '.pdb', '.pdb.bz2', '.pkl_pose',
-            '.pkl_pose.bz2', '.b64_pose', or '.b64_pose.bz2' file, or a `Pose`or `PackedPose`
-            object, from which to extract PyRosettaCluster instance kwargs. If 'input_file' is
-            provided, then ignore the 'scorefile' and 'decoy_name' keyword argument parameters.
-            Default: None
-        scorefile: A `str` object specifying the path to the JSON-formatted scorefile
-            from which to extract PyRosettaCluster instance kwargs. If 'scorefile'
-            is provided, 'decoy_name' must also be provided. In order to use a scorefile,
-            it must contain full simulation records from the original production
-            run; i.e., the attribute 'simulation_records_in_scorefile' was set to True.
-            Default: None
-        decoy_name: A `str` object specifying the decoy name for which to extract
-            PyRosettaCluster instance kwargs. If 'decoy_name' is provided, 'scorefile'
-            must also be provided.
-            Default: None
-        timeout: An `int` object specifying the timeout in seconds before exiting the subprocess.
-            Default: None
-
-    Returns:
-        None
-    """
-
-    if not environment_name:
-        environment_name = "PyRosettaCluster_" + datetime.now().strftime(
-            "%Y.%m.%d.%H.%M.%S.%f"
-        )
-
-    _conda_env_list_cmd = "conda env list"
-    try:
-        envs = subprocess.check_output(
-            _conda_env_list_cmd,
-            shell=True,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout,
-        ).decode()
-    except subprocess.CalledProcessError:
-        logging.error(f"Could not run `{_conda_env_list_cmd}`!")
-        raise
-
-    for line in envs.split(os.linesep):
-        if not line.startswith("#"):
-            assert (
-                line.split()[0] != environment_name
-            ), f"The 'environment_name' parameter '{environment_name}' already exists!"
-
-    _instance_kwargs = get_instance_kwargs(
-        input_file=input_file,
-        scorefile=scorefile,
-        decoy_name=decoy_name,
-    )
-    if "environment" in _instance_kwargs:
-        raw_yml = _instance_kwargs["environment"]
+    if with_metadata_kwargs:
+        return instance_kwargs, metadata_kwargs
     else:
-        raise NotImplementedError(
-            "PyRosettaCluster 'environment' instance attribute doesn't exist. "
-            + "recreate_environment() cannot create conda environment!"
-        )
-
-    if raw_yml:
-        with tempfile.TemporaryDirectory() as workdir:
-            yml_file = os.path.join(workdir, f"{environment_name}.yml")
-            with open(yml_file, "w") as f:
-                f.write(raw_yml)
-
-            _conda_env_create_cmd = (
-                f"conda env create --file {yml_file} --name {environment_name}"
-            )
-            try:
-                result = subprocess.check_output(
-                    _conda_env_create_cmd,
-                    shell=True,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout,
-                ).decode()
-                logging.info(
-                    f"recreate_environment() successfully created conda environment: {environment_name}"
-                )
-                logging.info(result)
-            except subprocess.CalledProcessError:
-                logging.error(f"Could not run `{_conda_env_create_cmd}`!")
-                raise
-    else:
-        raise NotImplementedError(
-            "PyRosettaCluster 'environment' instance attribute is empty. "
-            + "recreate_environment() cannot create conda environment!"
-        )
+        return instance_kwargs
 
 
 def reserve_scores(func: P) -> Union[P, NoReturn]:
     """
     Use this as a Python decorator of any user-provided PyRosetta protocol.
-    If any scoreterms and values are present in the input `packed_pose`, then if
-    they are deleted during execution of the decorated user-provided PyRosetta
-    protocol, then append those scoreterms and values back into the `pose.cache`
+    If any scoreterms and values are present in the input `PackedPose` object,
+    then if they are deleted during execution of the decorated user-provided PyRosetta
+    protocol, then restore those scoreterms and values back into the `Pose.cache`
     dictionary after execution. If any scoreterms and values are present in the
-    input `packed_pose` and also present in the returned or yielded output `Pose`
-    or `PackedPose` objects, then do not append the original scoreterms and values
-    back into the `pose.cache` dictionary after execution (that is, keep the outputted
-    scoreterms and values in the `pose.cache` dictionary). Any new scoreterms and
+    input `PackedPose` object and also present in the returned or yielded output `Pose`
+    or `PackedPose` object(s), then do not set the original scoreterms and values
+    back into the `Pose.cache` dictionary after execution (that is, keep the outputted
+    scoreterms and values in the `Pose.cache` dictionary). Any new scoreterms and
     values acquired in the decorated user-provided PyRosetta protocol will never
     be overwritten. This allows users to maintain scoreterms and values acquired
     in earlier user-defined PyRosetta protocols if needing to execute Rosetta
-    Movers that happen to delete scores from pose objects.
+    `Mover` objects that happen to delete scores from `Pose` objects. Note that
+    this decorator reserves scoreterms and values from the input `PackedPose.scores`
+    and `Pose.cache` dictionaries, and any scoreterms and values restored to any
+    output `Pose.cache` dictionaries are set as SimpleMetrics.
 
     For example:
-
+    ```
     @reserve_scores
     def my_pyrosetta_protocol(packed_pose, **kwargs):
         from pyrosetta import MyMover
         pose = packed_pose.pose
         MyMover().apply(pose)
         return pose
+    ```
 
     Args:
         A user-provided PyRosetta function.
@@ -479,10 +368,13 @@ def reserve_scores(func: P) -> Union[P, NoReturn]:
     @wraps(func)
     def wrapper(packed_pose, **kwargs):
         if packed_pose is not None:
-            _scores_dict = update_scores(packed_pose).scores
+            _reserved_pose = update_scores(packed_pose).pose
         else:
-            _scores_dict = {}
+            _reserved_pose = None
         _output = func(packed_pose, **kwargs)
+        # Only deserialize after the user-provided PyRosetta protocol finished executing, giving
+        # the user an opportunity to add secure packages to the unpickle-allowed list as necessary
+        _scores_dict = dict(_reserved_pose.cache) if _reserved_pose is not None else {}
 
         return reserve_scores_in_results(_output, _scores_dict, func.__name__)
 
@@ -508,11 +400,12 @@ def requires_packed_pose(func: P) -> Union[PackedPose, None, P]:
     protocols are skipped if they are decorated with this decorator.
 
     For example:
-
+    ```
     @requires_packed_pose
     def my_pyrosetta_protocol(packed_pose, **kwargs):
         assert packed_pose.pose.size() > 0
         return packed_pose
+    ```
 
     Args:
         A user-provided PyRosetta function.
@@ -547,6 +440,7 @@ def reproduce(
     instance_kwargs: Optional[Dict[Any, Any]] = None,
     clients_indices: Optional[List[int]] = None,
     resources: Optional[Dict[Any, Any]] = None,
+    retries: Optional[Union[int, List[int], Tuple[int, ...]]] = None,
     skip_corrections: bool = False,
     init_from_file_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Optional[NoReturn]:
@@ -626,6 +520,23 @@ def reproduce(
             applied, the protocols will not run. See https://distributed.dask.org/en/latest/resources.html for more
             information.
             Default: None
+        retries: An optional `list` or `tuple` of `int` objects, where each `int` object (≥0) sets the number of allowed
+            automatic retries of each failed task that was submitted to the corresponding user-provided PyRosetta protocol
+            (i.e., indexed the same as `client_indices`). If an `int` object (≥0) is provided, then apply that number of
+            allowed automatic retries to all user-provided PyRosetta protocols. If `None`, then no explicit retries are
+            allowed. If not `None` and not an `int` object, then the length of the `retries` parameter must equal the number
+            of protocols passed to the `PyRosettaCluster().distribute` method, and each `int` value determines the number
+            of automatic retries the dask scheduler allows for that protocol's failed tasks. Allowing retries of failed tasks
+            may be useful if remote compute resources are subject to preemption (e.g., cloud spot instances or backfill
+            queues). Note that retries are only appropriate for user-provided PyRosetta protocols that are side effect-free
+            upon preemption, in which tasks can be restarted without producing inconsistent external states if preempted midway
+            through the protocol. Also note that if `PyRosettaCluster(ignore_errors=True)` is used, then protocols failing due
+            to standard Python exceptions or Rosetta segmentation faults will still be considered successes, and this
+            keyword argument parameter has no effect on them since these protocol errors are ignored. However, if a compute
+            resource executing tasks is reclaimed midway through a protocol, then the dask scheduler registers those tasks
+            as incomplete, and they may be retried a certain number of times based on this keyword argument parameter.
+            See https://distributed.dask.org/en/latest/scheduling-state.html#task-state for more information.
+            Default: None
         skip_corrections: A `bool` object specifying whether or not to skip any ScoreFunction corrections specified in
             the PyRosettaCluster task 'options' or 'extra_options' values (extracted from either the 'input_file' or
             'scorefile' keyword argument parameter), which are set in-code upon PyRosetta initialization. If the current
@@ -643,6 +554,7 @@ def reproduce(
                 'relative_paths': True,
                 'dry_run': False,
                 'max_decompressed_bytes': pow(2, 30), # 1 GiB
+                'restore_rg_state': True,
                 'database': None,
                 'verbose': True,
                 'set_logging_handler': 'logging',
@@ -669,6 +581,7 @@ def reproduce(
                 relative_paths=True,
                 dry_run=False,
                 max_decompressed_bytes=pow(2, 30), # 1 GiB
+                restore_rg_state=True,
                 database=None,
                 verbose=True,
                 set_logging_handler="logging",
@@ -704,6 +617,7 @@ def reproduce(
                     scorefile=scorefile,
                     decoy_name=decoy_name,
                     skip_corrections=skip_corrections,
+                    with_metadata_kwargs=False,
                 ),
                 parse_instance_kwargs(instance_kwargs),
             ),
@@ -720,6 +634,8 @@ def reproduce(
         ),
         clients_indices=clients_indices,
         resources=resources,
+        priorities=None,
+        retries=retries,
     )
     if isinstance(_tmp_dir, tempfile.TemporaryDirectory):
         _tmp_dir.cleanup()
@@ -729,23 +645,28 @@ def produce(**kwargs: Any) -> Optional[NoReturn]:
     """
     `PyRosettaCluster().distribute()` shim requiring the 'protocols' keyword argument, and optionally
     any PyRosettaCluster keyword arguments or the 'clients_indices' keyword argument (when using
-    the `PyRosettaCluster(clients=...)` keyword argument), or the 'resources' keyword argument.
+    the `PyRosettaCluster(clients=...)` keyword argument), the 'resources' keyword argument,
+    the 'priorities' keyword argument, or the 'retries' keyword argument.
 
     Args:
         **kwargs: See `PyRosettaCluster` docstring. The keyword arguments must also include
             'protocols', an iterable object of function or generator objects specifying
             an ordered sequence of user-defined PyRosetta protocols to execute for
             the simulation (see `PyRosettaCluster().distribute` docstring). The keyword arguments
-            may also optionally include 'clients_indices' or 'resources' (see
-            `PyRosettaCluster().distribute` docstring).
+            may also optionally include 'clients_indices', 'resources', 'priorities', and 'retries'
+            (see `PyRosettaCluster().distribute` docstring).
     """
     protocols = kwargs.pop("protocols", None)
     clients_indices = kwargs.pop("clients_indices", None)
     resources = kwargs.pop("resources", None)
+    priorities = kwargs.pop("priorities", None)
+    retries = kwargs.pop("retries", None)
     PyRosettaCluster(**kwargs).distribute(
         protocols=protocols,
         clients_indices=clients_indices,
         resources=resources,
+        priorities=priorities,
+        retries=retries,
     )
 
 run: Callable[..., Optional[NoReturn]] = produce
@@ -755,10 +676,14 @@ def iterate(**kwargs: Any) -> Union[NoReturn, Generator[Tuple[PackedPose, Dict[A
     protocols = kwargs.pop("protocols", None)
     clients_indices = kwargs.pop("clients_indices", None)
     resources = kwargs.pop("resources", None)
+    priorities = kwargs.pop("priorities", None)
+    retries = kwargs.pop("retries", None)
     for result in PyRosettaCluster(**kwargs).generate(
         protocols=protocols,
         clients_indices=clients_indices,
         resources=resources,
+        priorities=priorities,
+        retries=retries,
     ):
         yield result
 
